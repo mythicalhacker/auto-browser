@@ -13,12 +13,12 @@ Before the MCP browser orchestrator, we tested a different mechanism for the sam
 ## What we learned
 
 1. **Prompts must go in via stdin, not as a CLI argument.** `claude -p "<prompt>" --output-format json` hangs; `echo "<prompt>" | claude -p --output-format json` works. The dispatcher was fixed accordingly (`dispatcher.py` passes `input=prompt` to `subprocess.run`).
-2. **Invoke the CLI by explicit path.** Bare `claude` can resolve to a different executable on PATH and silently produce empty output (set `CLAUDE_CODE_CLI` to your install, e.g. `~/.local/bin/claude`).
+2. **Invoke the CLI by explicit path.** Bare `claude` can resolve to a different executable on PATH and silently produce empty output (point the `CLAUDE_CODE_CLI` constant in `dispatcher.py` at your install, e.g. `~/.local/bin/claude`).
 3. **Parallel dispatch works.** Two concurrent CLI workers completed independent tasks with no interference and near-perfect overlap.
 
 ## Why it was superseded
 
-The CLI-worker approach costs API tokens per worker and can't leverage existing chat subscriptions, and the file-based task protocol added coordination overhead. The project moved to the [MCP browser orchestrator](../../mcp-orchestrator/) (drive already-authenticated chat UIs over CDP). The CLI-worker idea itself matured into a separate project (a parallel dev pipeline with planner/critic/executor roles).
+The CLI-worker approach costs API tokens per worker and can't leverage existing chat subscriptions, and the file-based task protocol added coordination overhead. The project moved to the [MCP browser orchestrator](../../mcp-orchestrator/) (drive already-authenticated chat UIs over CDP). The CLI-worker idea itself matured into a separate project: [auto-code](https://github.com/mythicalhacker/auto-code), a parallel dev pipeline with planner/critic/executor roles.
 
 ## Status
 

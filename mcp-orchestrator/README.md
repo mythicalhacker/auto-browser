@@ -42,14 +42,21 @@ Edit: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ## Tools
 
+**Consensus** — the core workflow:
+
 | Tool | Description |
 |------|-------------|
 | `connect_browser` | Connect to Chrome on CDP port 9222 |
+| `health_check` | Verify Chrome connection, tabs, and login state |
 | `send_single_round` | Send prompt to all 3 models and wait for responses (single round) |
 | `start_consensus` | Start autonomous consensus workflow (iterates until agreement) |
 | `get_consensus_status` | Check current consensus workflow status and progress |
 | `get_consensus_results` | Get full results from completed or in-progress workflow |
 | `get_last_round` | Get just the last round's outputs |
+
+**Browser automation** — 18 general-purpose `browser_*` tools for driving the connected Chrome directly: navigation (`browser_navigate`, `browser_back`, `browser_forward`, `browser_new_tab`, `browser_close_tab`, `browser_tabs`), interaction (`browser_click`, `browser_type`, `browser_hover`, `browser_select`, `browser_press_key`, `browser_wait`, `browser_file_upload`), and inspection (`browser_get_text`, `browser_get_html`, `browser_screenshot`, `browser_snapshot`, `browser_evaluate`).
+
+**Task queue & dispatch** — queue prompts as background tasks: `task_submit`, `task_status`, `task_list`, `task_cancel`, plus `task_run` / `task_run_all` for direct dispatch.
 
 ---
 
@@ -84,3 +91,12 @@ The consensus workflow cross-pollinates responses: each model receives the OTHER
 **Selectors not working**
 - Sites update their UI often; selectors are defined in `config.js`
 - Run `node tests/unit/test-selectors.js` to check them
+
+---
+
+## Tests
+
+```bash
+node tests/run-all.js --quick   # unit + integration (skips the e2e consensus test)
+node tests/run-all.js           # full suite — requires Chrome connected with fresh chat tabs
+```

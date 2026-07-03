@@ -10,7 +10,7 @@ Instead of paying for three APIs, Auto_Browser attaches to a Chrome instance you
 
 | Path | What it is |
 |------|------------|
-| `mcp-orchestrator/` | **The main component.** Node.js MCP server (v3.0.0) with tools like `start_consensus`, `get_consensus_status`, `send_single_round`. See its [README](mcp-orchestrator/README.md). |
+| `mcp-orchestrator/` | **The main component.** Node.js MCP server exposing consensus tools (`start_consensus`, `send_single_round`, …), 18 general browser-automation tools, and a task queue. See its [README](mcp-orchestrator/README.md). |
 | `experiments/cli-dispatcher/` | The earlier approach we tested: fan work out to parallel Claude Code CLI worker sessions instead of browser automation. Archived with its findings — see its [README](experiments/cli-dispatcher/README.md). |
 
 ## Quick start
