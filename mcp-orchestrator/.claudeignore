@@ -1,0 +1,12 @@
+# Chrome debug profile (user data dir) - DO NOT INDEX
+.chrome-debug/
+chrome-debug-profile/
+
+# Standard exclusions
+node_modules/
+.git/
+.pipeline/
+*.log
+*.pma
+*.db
+*.sqlite
