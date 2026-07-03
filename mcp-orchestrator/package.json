@@ -1,6 +1,6 @@
 {
   "name": "mcp-orchestrator",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "MCP server for multi-model prompt orchestration",
   "main": "server.js",
   "type": "module",

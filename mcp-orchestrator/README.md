@@ -83,4 +83,4 @@ The consensus workflow cross-pollinates responses: each model receives the OTHER
 
 **Selectors not working**
 - Sites update their UI often; selectors are defined in `config.js`
-- Check `CLAUDE.md` for current verified selectors
+- Run `node tests/unit/test-selectors.js` to check them
