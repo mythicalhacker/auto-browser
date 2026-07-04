@@ -147,31 +147,42 @@ async function clickSubmit(page, sel) {
   else await page.keyboard.press("Enter");
 }
 
+// Throw carrying a sendPhase so callers can distinguish a provably-UNSENT
+// failure (safe to resend) from an AMBIGUOUS post-submit failure (the message
+// may have gone — a resend could double a paid deep-research run).
+//   'unsent'    — nothing was submitted; safe to retry
+//   'ambiguous' — submit was clicked and the outcome is unknown; DO NOT resend
+function sendError(model, message, sendPhase) {
+  const e = new Error(`${model}: ${message}`);
+  e.sendPhase = sendPhase;
+  return e;
+}
+
 export async function sendToModel(browserService, model, prompt) {
   const page = browserService.getPage(model);
-  if (!page) throw new Error(`${model} tab not found`);
+  if (!page) throw sendError(model, 'tab not found', 'unsent');
   const sel = SELECTORS[model];
   const tail = promptTail(prompt);
 
   // Phase 1 — insert with RECEIPT: the tail must appear in the composer
   // before any submit. One guarded re-insert: only when the composer is
   // readable and carries no in-composer adornment (research pill) that a
-  // clear would destroy.
+  // clear would destroy. Every throw here is pre-submit ⇒ 'unsent'.
   await insertPrompt(page, model, sel, prompt);
   if (tail) {
     let received = await pollComposerTail(page, sel, tail, true, SEND_RECEIPT_MS);
     if (received === null) {
-      throw new Error(`${model}: composer unreadable after insert — cannot verify send`);
+      throw sendError(model, 'composer unreadable after insert — cannot verify send', 'unsent');
     }
     if (received === false) {
       if (await composerHoldsAdornment(page, model)) {
-        throw new Error(`${model}: prompt did not register and composer holds a mode pill — refusing to clear it`);
+        throw sendError(model, 'prompt did not register and composer holds a mode pill — refusing to clear it', 'unsent');
       }
       await clearComposer(page, sel);
       await insertPrompt(page, model, sel, prompt);
       received = await pollComposerTail(page, sel, tail, true, SEND_RECEIPT_MS);
       if (received !== true) {
-        throw new Error(`${model}: prompt did not register in composer (insert failed twice)`);
+        throw sendError(model, 'prompt did not register in composer (insert failed twice)', 'unsent');
       }
     }
   }
@@ -189,13 +200,20 @@ export async function sendToModel(browserService, model, prompt) {
   if (tail) {
     let released = await pollComposerTail(page, sel, tail, false, SEND_VERIFY_MS);
     if (released === null) {
-      throw new Error(`${model}: send not verified (composer state ambiguous after submit)`);
+      // Composer went unreadable AFTER the click: the message may have been
+      // delivered. Ambiguous — callers must not auto-resend.
+      throw sendError(model, 'send not verified (composer state ambiguous after submit)', 'ambiguous');
     }
     if (released === false) {
+      // Composer still holds the prompt ⇒ the first submit provably did not
+      // fire; a second submit cannot double-send.
       await clickSubmit(page, sel);
       released = await pollComposerTail(page, sel, tail, false, SEND_VERIFY_MS);
-      if (released !== true) {
-        throw new Error(`${model}: send not registered after retry (composer never cleared)`);
+      if (released === null) {
+        throw sendError(model, 'send not verified (composer state ambiguous after retry submit)', 'ambiguous');
+      }
+      if (released === false) {
+        throw sendError(model, 'send not registered after retry (composer never cleared)', 'unsent');
       }
     }
   }

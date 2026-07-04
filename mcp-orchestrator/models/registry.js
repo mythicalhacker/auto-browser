@@ -83,9 +83,14 @@ const DEFAULTS = {
       projects: true,
       modelChoices: ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5'],
     },
+    // Default ensureChat profile for deep-research runs (user preference:
+    // top models with thinking; claude thinking is built in, effort=max).
+    research: { model: 'Fable 5', modes: {} },
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 900, windowMs: 5 * 60 * 60 * 1000, name: '5 hours' },
+      // No hard daily DR cap observed on the Max plan; banner detection
+      // handles dynamic limits.
     },
   },
   chatgpt: {
@@ -147,6 +152,7 @@ const DEFAULTS = {
       // reload forces React to re-render from server state.
       reloadOnEmptyOutput: true,
     },
+    research: { model: 'Pro Extended', modes: {} },
     timeouts: { response: 600000 },
     quotas: {
       // maxPerWindow Infinity (null in JSON) = never warn/throttle, but keep
@@ -210,9 +216,13 @@ const DEFAULTS = {
       projects: true, // notebooks
       modelChoices: ['3.1 Flash-Lite', '3.5 Flash', '3.1 Pro'],
     },
+    research: { model: '3.1 Pro', modes: { extendedThinking: true } },
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 100, windowMs: 24 * 60 * 60 * 1000, name: '24 hours' },
+      // Observed product limit ≈5 deep-research runs/day on this tier —
+      // config, not constant; verify live and adjust via override file.
+      deepResearchPerDay: 5,
     },
   },
 };
@@ -330,6 +340,17 @@ function validateProvider(name, d, problems) {
     if (!isPlainObject(d.timeouts)) p('"timeouts" must be an object');
     else if (d.timeouts.response !== undefined && !(Number.isFinite(d.timeouts.response) && d.timeouts.response > 0)) {
       p('"timeouts.response" must be a positive number (ms)');
+    }
+  }
+  if (d.research !== undefined) {
+    if (!isPlainObject(d.research)) p('"research" must be an object');
+    else {
+      if (d.research.model !== undefined && (typeof d.research.model !== 'string' || !d.research.model)) {
+        p('"research.model" must be a non-empty string');
+      }
+      if (d.research.modes !== undefined && !isPlainObject(d.research.modes)) {
+        p('"research.modes" must be an object');
+      }
     }
   }
   const q = d.quotas;
