@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+import { createRequire } from "module";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -7,8 +9,11 @@ import { getBrowserToolDefinitions, handleBrowserToolCall, BROWSER_TOOL_NAMES } 
 import { getTaskToolDefinitions, handleTaskToolCall, TASK_TOOL_NAMES } from './tools/task-queue.js';
 import { getDispatchToolDefinitions, handleDispatchToolCall, DISPATCH_TOOL_NAMES } from './services/dispatcher.js';
 
+// Single source of truth for the version — package.json.
+const { version } = createRequire(import.meta.url)("./package.json");
+
 const server = new Server(
-  { name: "mcp-orchestrator", version: "3.0.0" },
+  { name: "mcp-orchestrator", version },
   { capabilities: { tools: {} } }
 );
 
