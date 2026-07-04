@@ -118,6 +118,11 @@ export async function detectInterrupt(page, provider, now = Date.now()) {
     ...(d?.selectors?.output ?? []),
     ...(d?.selectors?.userMessage ?? []),
     ...(d?.selectors?.input ?? []),
+    // A deep-research report can render in a dedicated pane the runner polls
+    // as a reportContainer — subtract it too, or report prose that discusses
+    // "rate limited"/"blocked" would be misread as a quota/pause interrupt and
+    // abandon the completed paid run.
+    ...(d?.generationGates ?? []).flatMap((g) => g.reportContainer ?? []),
   ];
   let scan = null;
   try {

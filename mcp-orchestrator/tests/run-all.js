@@ -136,6 +136,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Research Gates",
+    file: "unit/test-research-gates.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Dead-Module Wiring",
     file: "unit/test-dead-module-wiring.js",
     critical: false,

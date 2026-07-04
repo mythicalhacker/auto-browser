@@ -99,6 +99,9 @@ export function submitBatch(items, { batch = null, now = Date.now() } = {}) {
         // chatUrl: that task-provider must RESUME (re-open chatUrl, re-harvest)
         // on any later processing — never re-run, or it double-spends.
         spent: false,
+        // Loop guard: at most one auto-reply to a provider's clarifying
+        // question per task-provider (persists across resume).
+        gateReplied: false,
         chatUrl: null,
         startedAt: null,
         finishedAt: null,
@@ -216,6 +219,11 @@ export function markSpent(id, provider, { now = Date.now() } = {}) {
  * re-run fresh (no report exists), and the ledger count is refunded too. */
 export function clearSpend(id, provider) {
   return update(id, provider, { spent: false, spentAt: null, chatUrl: null });
+}
+
+/** Record that the runner auto-replied once to a clarifying-question gate. */
+export function markGateReplied(id, provider) {
+  return update(id, provider, { gateReplied: true });
 }
 
 /** Record the live conversation URL — set once, never clobbered. */

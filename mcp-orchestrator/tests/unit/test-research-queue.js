@@ -15,6 +15,10 @@ process.env.STATE_FILE = join(tmpdir(), `research-test-state-${process.pid}.json
 process.env.SEND_VERIFY_MS = '200';
 process.env.SEND_RECEIPT_MS = '150';
 process.env.DR_RETRY_DELAY_MS = '1';
+// Fake sites carry no pre-generation gate; keep the gate watch window tiny so
+// the runner's post-send gate check returns fast instead of polling minutes.
+process.env.DR_GATE_WATCH_MS = '50';
+process.env.DR_GATE_POLL_MS = '5';
 
 // Force UNIQUE tmp paths regardless of inherited env — this file rmSync's
 // them, and a user who exported RESEARCH_HOME/QUOTA_FILE pointing at their

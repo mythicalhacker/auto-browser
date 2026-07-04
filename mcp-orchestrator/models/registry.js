@@ -86,6 +86,21 @@ const DEFAULTS = {
     // Default ensureChat profile for deep-research runs (user preference:
     // top models with thinking; claude thinking is built in, effort=max).
     research: { model: 'Fable 5', modes: {} },
+    // DR pre-generation gate (live-discovered 2026-07-04): a connector-
+    // selection MODAL ("Enable connectors for Claude to use in research")
+    // appears ~5s after send. detect scoped to a dialog carrying connector
+    // switches (not any CDS dialog); action = the Confirm (accept-defaults)
+    // button; progress = the research card once it leaves the "Stopped" state.
+    generationGates: [{
+      kind: 'modal',
+      detect: [
+        'div[role="dialog"][data-cds="Dialog"] [role="switch"][data-cds="Switch"]',
+        'div[role="dialog"][data-cds="Dialog"] h2',
+      ],
+      action: ['[role="dialog"] button[aria-keyshortcuts="Enter"]'],
+      progressMarker: ['button[aria-label*="Open research panel"]:not([aria-label^="Stopped"])'],
+      reportContainer: ['div[role="article"][aria-label^="Message"] .font-claude-response'],
+    }],
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 900, windowMs: 5 * 60 * 60 * 1000, name: '5 hours' },
@@ -153,6 +168,26 @@ const DEFAULTS = {
       reloadOnEmptyOutput: true,
     },
     research: { model: 'Pro Extended', modes: {} },
+    // DR pre-generation gate (live-discovered 2026-07-04): ChatGPT may pose a
+    // CLARIFYING QUESTION as an assistant message before researching (no
+    // button — the runner replies once). A completed report carries inline
+    // source chips [webpage-citation-pill] / a Sources footer, so those
+    // (plus streaming) are the progressMarker: their presence means the turn
+    // is a run/report, not a question → do not reply.
+    generationGates: [{
+      kind: 'clarify',
+      detect: ['[data-message-author-role="assistant"]'],
+      clarifyMessage: ['[data-message-author-role="assistant"] .markdown', '[data-message-author-role="assistant"]'],
+      // REPORT-specific ONLY (inline source chips / Sources footer). NOT the
+      // streaming stop-button — that is present while the CLARIFYING QUESTION
+      // streams too, and would make the runner think a report exists and skip
+      // the reply. A clarification never carries citations.
+      progressMarker: [
+        '[data-testid="webpage-citation-pill"]',
+        '[data-testid^="conversation-turn-"]:has(button[aria-label="Sources"])',
+      ],
+      reportContainer: ['[data-message-author-role="assistant"] .markdown'],
+    }],
     timeouts: { response: 600000 },
     quotas: {
       // maxPerWindow Infinity (null in JSON) = never warn/throttle, but keep
@@ -217,6 +252,22 @@ const DEFAULTS = {
       modelChoices: ['3.1 Flash-Lite', '3.5 Flash', '3.1 Pro'],
     },
     research: { model: '3.1 Pro', modes: { extendedThinking: true } },
+    // DR pre-generation gate (live-discovered 2026-07-04): Gemini Deep
+    // Research goes straight to a research PLAN with a "Start research" button
+    // (no clarify step) — the plan is free, the run only starts on the click.
+    // progressMarker = streaming stop control once the plan is confirmed.
+    generationGates: [{
+      kind: 'plan_confirm',
+      detect: ['deep-research-confirmation-widget', 'button[aria-label="Start research"]'],
+      action: ['button[aria-label="Start research"]', 'gem-button[data-test-id="confirm-button"] button'],
+      // No verified post-Start marker exists (the plan streams with a Stop
+      // control too, so streaming is NOT a "started" signal). Left empty:
+      // resolution relies on the Start button being clicked once (guarded)
+      // and the confirmation widget then disappearing (detect no longer
+      // matches). Populate once a real started run is observed.
+      progressMarker: [],
+      reportContainer: ['div[id^="model-response-message-content"].markdown.markdown-main-panel', 'message-content'],
+    }],
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 100, windowMs: 24 * 60 * 60 * 1000, name: '24 hours' },
@@ -352,6 +403,23 @@ function validateProvider(name, d, problems) {
         p('"research.modes" must be an object');
       }
     }
+  }
+  // Deep-research PRE-GENERATION gates the runner clears after send:
+  // modal / plan_confirm (click `action`), clarify (auto-reply once).
+  if (d.generationGates !== undefined) {
+    if (!Array.isArray(d.generationGates)) p('"generationGates" must be an array');
+    else d.generationGates.forEach((g, i) => {
+      const gp = (msg) => p(`"generationGates[${i}]": ${msg}`);
+      if (!isPlainObject(g)) { gp('must be an object'); return; }
+      if (!['modal', 'clarify', 'plan_confirm'].includes(g.kind)) gp('"kind" must be modal|clarify|plan_confirm');
+      if (!isStringArray(g.detect) || g.detect.length === 0) gp('"detect" must be a non-empty array of strings');
+      for (const key of ['action', 'clarifyMessage', 'progressMarker', 'reportContainer']) {
+        if (g[key] !== undefined && !isStringArray(g[key])) gp(`"${key}" must be an array of strings`);
+      }
+      if ((g.kind === 'modal' || g.kind === 'plan_confirm') && (!isStringArray(g.action) || g.action.length === 0)) {
+        gp(`"action" (the confirm/Start control) is required for kind "${g.kind}"`);
+      }
+    });
   }
   const q = d.quotas;
   if (!isPlainObject(q)) {

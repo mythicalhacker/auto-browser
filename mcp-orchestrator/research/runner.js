@@ -38,6 +38,104 @@ function researchPrompt(task) {
   return `${DR_PREAMBLE}${task.prompt}`;
 }
 
+// Post-send watch window in which the runner clears a provider's
+// pre-generation gate (Claude connector modal, ChatGPT clarification, Gemini
+// plan confirmation) so an unattended run actually starts researching.
+export const GATE_WATCH_MS = Number(process.env.DR_GATE_WATCH_MS) || 180000; // 3 min
+const GATE_POLL_MS = Number(process.env.DR_GATE_POLL_MS) || 5000;
+const CLARIFY_REPLY = 'Proceed exactly as specified. Make reasonable assumptions. '
+  + 'Do not ask further questions — produce the full report now.';
+
+async function anyMatch(page, selectors) {
+  return !!(await findFirst(page, selectors ?? []));
+}
+
+// The clarifying question is the LATEST assistant message — read the LAST
+// matching element (discovery: never :last-of-type; take .at(-1)).
+async function lastInnerText(page, selectors) {
+  const els = await findAll(page, selectors ?? []);
+  if (els.length === 0) return null;
+  try { return (await els[els.length - 1].innerText()).trim(); } catch { return null; }
+}
+
+// CONSERVATIVE: only a SHORT message carrying a question is treated as a
+// clarification. A long message is (or is becoming) the report — never reply
+// to it, so we can't accidentally derail a real report with a spurious answer.
+function looksLikeClarification(text) {
+  if (!text) return false;
+  const t = text.trim();
+  return t.length > 0 && t.length < 1500 && /\?/.test(t);
+}
+
+/**
+ * Clear the provider's deep-research pre-generation gate after send (or on
+ * resume). modal / plan_confirm → click the confirm/Start control; clarify →
+ * reply ONCE with a fixed "just produce the report" message (loop-guarded by
+ * the persisted gateReplied flag). Returns once research is underway, a gate
+ * was actioned, or the watch window expires. Never replies to a message that
+ * might be the report (conservative bias) — the DR timeout then preserves the
+ * chat URL, unchanged from before.
+ */
+const REPORT_FORMING_CHARS = 400; // a message this long is the report, not a question
+
+export async function clearGenerationGates(browserService, provider, task, { log = () => {} } = {}) {
+  const page = browserService.getPage(provider);
+  const gates = getProvider(provider)?.generationGates ?? [];
+  if (!page || gates.length === 0) return { actioned: [] };
+  const deadline = Date.now() + GATE_WATCH_MS;
+  const actioned = [];
+  // A modal/plan_confirm gate is confirmed at most ONCE — a second click on a
+  // Confirm/Start control could launch a second (paid) run. Resolution is
+  // decided PER GATE (never a global streaming short-circuit): a gate's own
+  // progressMarker means research is underway FOR THAT GATE. Crucially, a
+  // gate's progressMarker must be a research-UNDERWAY signal, not mere
+  // streaming — streaming is also present while a clarifying question or a
+  // plan is being generated.
+  const clicked = new Set();
+
+  while (Date.now() < deadline) {
+    let unresolved = 0;
+    for (let i = 0; i < gates.length; i++) {
+      const gate = gates[i];
+      const running = (gate.progressMarker?.length ?? 0) > 0 && await anyMatch(page, gate.progressMarker);
+
+      if (gate.kind === 'modal' || gate.kind === 'plan_confirm') {
+        if (clicked.has(i) || running) continue; // confirmed / underway → resolved
+        if (!(await anyMatch(page, gate.detect))) { unresolved++; continue; } // gate not shown yet — keep waiting
+        const m = await findFirst(page, gate.action);
+        if (!m) { unresolved++; continue; } // gate shown but action control not ready
+        try {
+          await m.element.click({ force: true });
+          clicked.add(i);
+          actioned.push(gate.kind);
+          log(`[${provider}] ${task.id}: cleared ${gate.kind} gate`);
+        } catch { unresolved++; } // control moved — retry next poll
+      } else { // clarify — reply at most once; NEVER to a report
+        if (queue.getTask(task.id).perProvider[provider].gateReplied || running) continue; // replied / report present → resolved
+        if (!(await anyMatch(page, gate.detect))) { unresolved++; continue; } // no assistant turn yet
+        const text = await lastInnerText(page, gate.clarifyMessage ?? gate.detect);
+        if (looksLikeClarification(text)) {
+          queue.markGateReplied(task.id, provider); // seal the guard BEFORE the send (crash-safe: never re-reply)
+          try {
+            await sendToModel(browserService, provider, CLARIFY_REPLY);
+            actioned.push('clarify');
+            log(`[${provider}] ${task.id}: auto-replied to a clarifying question`);
+          } catch (e) {
+            log(`[${provider}] ${task.id}: clarify reply failed (${e.message})`);
+          }
+        } else if (text && text.length >= REPORT_FORMING_CHARS) {
+          continue; // a long message is the report forming, not a question → resolved
+        } else {
+          unresolved++; // short / no question yet — keep watching within the window
+        }
+      }
+    }
+    if (unresolved === 0) return { actioned }; // every gate confirmed / replied / underway
+    await page.waitForTimeout(GATE_POLL_MS);
+  }
+  return { actioned };
+}
+
 /**
  * Wait for a deep-research run to finish on `page`.
  * Completion = latest output text ≥ DR_MIN_REPORT_CHARS, no streaming
@@ -52,6 +150,11 @@ export async function waitForResearchComplete(page, provider, {
   onUrl = () => {},
 } = {}) {
   const sel = SELECTORS[provider];
+  // A deep-research report can render in a dedicated panel, not the normal
+  // chat output container — poll both.
+  const reportContainers = (getProvider(provider)?.generationGates ?? [])
+    .flatMap((g) => g.reportContainer ?? []);
+  const outputSelectors = [...sel.output, ...reportContainers];
   const reloadOnEmpty = getProvider(provider)?.capabilities?.reloadOnEmptyOutput;
   const deadline = Date.now() + timeoutMs;
   let lastText = null;
@@ -72,7 +175,7 @@ export async function waitForResearchComplete(page, provider, {
 
     let text = '';
     try {
-      const els = await findAll(page, sel.output);
+      const els = await findAll(page, outputSelectors);
       if (els.length > 0) text = (await els[els.length - 1].innerText()).trim();
     } catch {
       text = '';
@@ -208,6 +311,9 @@ export async function resumeProviderTask(browserService, provider, task, { log =
   }
   queue.markResuming(task.id, provider);
   log(`[${provider}] ${task.id}: resuming harvest at ${pp.chatUrl}`);
+  // A sealed spend whose gate was never cleared must clear it on resume —
+  // NOT re-send (extends the never-double-spend invariant).
+  await clearGenerationGates(browserService, provider, task, { log });
   const result = await waitForResearchComplete(page, provider, {
     ...(task.timeoutMs ? { timeoutMs: task.timeoutMs } : {}),
     ...waitOpts,
@@ -295,7 +401,11 @@ export async function runProviderTask(browserService, provider, task, { log = ()
     await page.waitForTimeout(1000);
   }
   queue.recordChatUrl(task.id, provider, page.url());
-  log(`[${provider}] ${task.id}: research running (${page.url()})`);
+  log(`[${provider}] ${task.id}: sent; watching for a pre-generation gate`);
+
+  // Clear the provider's pre-generation gate (connector modal / clarification
+  // / plan confirmation) so the run actually starts researching.
+  await clearGenerationGates(browserService, provider, task, { log });
 
   const result = await waitForResearchComplete(page, provider, {
     ...(task.timeoutMs ? { timeoutMs: task.timeoutMs } : {}),
