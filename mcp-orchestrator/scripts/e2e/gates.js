@@ -695,7 +695,10 @@ export async function gateDrivers(log) {
  * 5–45 min/provider, parallel). */
 export async function gateResearchDR(log) {
   const details = [];
-  const providers = ['claude', 'chatgpt']; // gemini deliberately excluded
+  // Default claude+chatgpt (GATE 10); override with E2E_DR_PROVIDERS for
+  // GATE 13 (e.g. "chatgpt,gemini" — skip a credit-limited Claude).
+  const providers = (process.env.E2E_DR_PROVIDERS || 'claude,chatgpt')
+    .split(',').map((s) => s.trim()).filter(Boolean);
   const { submitBatch, statusTable, getTask, listTasks } = await import('../../research/research-queue.js');
   const { drainQueue } = await import('../../research/runner.js');
   const { quotaSnapshot } = await import('../../research/quota-ledger.js');
@@ -710,13 +713,18 @@ export async function gateResearchDR(log) {
   charge(providers, 1); // each DR run sends exactly one prompt message
 
   const usedBefore = quotaSnapshot(providers);
+  // gemini only gets a task slot via gemini_priority routing; drain only the
+  // approved `providers`, leaving any other routed slot untouched (unspent).
+  const geminiPriority = providers.includes('gemini');
   const { batch, taskIds } = submitBatch([{
     prompt: 'Research the release history of Node.js LTS versions. Produce a short report (a few paragraphs): list the major LTS lines with their release and end-of-life years, and note the current active LTS.',
+    gemini_priority: geminiPriority,
   }]);
   const taskId = taskIds[0];
-  assertInto(details, getTask(taskId).providers.join(',') === 'claude,chatgpt',
-    `standard task routed to claude+chatgpt only (no gemini DR)`);
-  log(`submitted DR batch ${batch} task ${taskId}`);
+  const slots = getTask(taskId).providers;
+  assertInto(details, providers.every((p) => slots.includes(p)),
+    `task has slots for the DR providers ${providers.join('+')} (routed: ${slots.join(',')})`);
+  log(`submitted DR batch ${batch} task ${taskId}; draining ${providers.join('+')}`);
 
   try {
     // Generous ceiling: a short LTS report should finish well inside 40 min.
