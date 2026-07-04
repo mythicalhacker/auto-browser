@@ -25,6 +25,19 @@ export const DR_STABLE_MS = Number(process.env.DR_STABLE_MS) || 90 * 1000; // re
 export const DR_POLL_MS = Number(process.env.DR_POLL_MS) || 5000;
 const DR_MIN_REPORT_CHARS = 400; // interim status blurbs are shorter than any real report
 
+// Unattended DR: both Claude and ChatGPT deep research OPEN with a clarifying
+// question ("which connectors?", "to tailor the research…") and STOP for a
+// user answer (observed live 2026-07-04 — the run stalls forever otherwise).
+// This preamble tells the model to skip that step and produce the report in
+// one pass. Overridable via ~/.auto-browser/prompts/research-preamble.md.
+export const DR_PREAMBLE = 'IMPORTANT: This runs unattended — do NOT ask any clarifying or scoping '
+  + 'questions and do NOT wait for a reply. Make reasonable assumptions, use the default/all available '
+  + 'sources, and produce the COMPLETE research report in this single response now.\n\n';
+
+function researchPrompt(task) {
+  return `${DR_PREAMBLE}${task.prompt}`;
+}
+
 /**
  * Wait for a deep-research run to finish on `page`.
  * Completion = latest output text ≥ DR_MIN_REPORT_CHARS, no streaming
@@ -259,7 +272,7 @@ export async function runProviderTask(browserService, provider, task, { log = ()
   recordDRSpend(provider); // counted at send time — a started run is a paid run
   queue.markSpent(task.id, provider); // sealed BEFORE the send click: a crash mid-send resumes/fails, never re-runs
   try {
-    await sendToModel(browserService, provider, task.prompt);
+    await sendToModel(browserService, provider, researchPrompt(task));
   } catch (e) {
     if (e.sendPhase === 'ambiguous') {
       // The message may have been delivered — resuming (not resending) is the

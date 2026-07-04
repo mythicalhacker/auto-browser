@@ -301,6 +301,7 @@ function fakeResearchSite({ mode = 'complete', loggedIn = true, sent = false, ch
         case 'button[aria-label="Send message"]':
           return [el('send', { onClick: () => {
             if (state.draft) {
+              state.lastSent = state.draft;
               state.draft = '';
               state.sent = true;
               // Ambiguous send: composer becomes unreadable right after submit
@@ -338,6 +339,9 @@ const FAST = { pollMs: 2, stableMs: 20, timeoutMs: 3000 };
   const status = await runner.runProviderTask(fakeBS(site), 'claude', queue.getTask(id), { waitOpts: FAST });
   const pp = queue.getTask(id).perProvider.claude;
   assert(status === 'complete' && pp.status === 'complete', 'happy path completes');
+  assert(site.state.lastSent && site.state.lastSent.startsWith(runner.DR_PREAMBLE)
+    && site.state.lastSent.includes('release history of Node.js LTS'),
+    'DR send prepends the no-clarifying-questions preamble to the task prompt');
   assert(pp.chatUrl === 'https://claude.ai/chat/dr-run-1', 'chatUrl captured from the live run');
   assert(pp.artifactPath && existsSync(pp.artifactPath)
     && readFileSync(pp.artifactPath, 'utf8').includes('Research Report'),
