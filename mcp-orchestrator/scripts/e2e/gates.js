@@ -581,6 +581,106 @@ export async function gateCompression(log) {
   return details;
 }
 
+/** Live: PR-9 drivers — ensureChat into the user-named project (PAUSE-P
+ * supplies E2E_PROJECT_NAME + E2E_PROJECT_PROVIDERS), verified model
+ * selection, a deliberately-missing project → typed project_not_found +
+ * normal-chat fallback, and a 1-line round-trip INSIDE the project chat via
+ * the production send path (send-verification live). Zero DR spend;
+ * 1 message/provider. */
+export async function gateDrivers(log) {
+  const details = [];
+  const projectName = process.env.E2E_PROJECT_NAME;
+  if (!projectName) {
+    return ['BLOCKED: PAUSE-P incomplete — set E2E_PROJECT_NAME (and optionally '
+      + 'E2E_PROJECT_PROVIDERS=claude,chatgpt / E2E_DRIVER_MODEL_<ID>) before running this gate'];
+  }
+  const projectProviders = (process.env.E2E_PROJECT_PROVIDERS || 'claude,chatgpt')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const unknownProviders = projectProviders.filter((p) => !providerNames().includes(p));
+  if (unknownProviders.length > 0) {
+    return [`BLOCKED: E2E_PROJECT_PROVIDERS names unknown provider(s): ${unknownProviders.join(', ')} `
+      + `(known: ${providerNames().join(', ')})`];
+  }
+
+  const { getDriver } = await import('../../models/drivers/index.js');
+  const { sendToModel, waitForComplete, getOutput } = await import('../../tools/consensus.js');
+  const { SELECTORS } = await import('../../config.js');
+  const { findAll } = await import('../../utils/selectors.js');
+  const { browserService } = await import('../../services/browser-service.js');
+
+  const models = providerNames();
+  await pauseBetweenConsensusRuns(log);
+
+  try {
+    await browserService.connect();
+    // Charge only providers whose tab exists — a missing tab sends nothing
+    // and must not leak budget from the persistent ledger.
+    const present = models.filter((m) => browserService.getPage(m));
+    charge(present, 1); // one round-trip message per provider; ensureChat itself sends nothing
+    for (const model of models) {
+      const page = browserService.getPage(model);
+      if (!assertInto(details, !!page, `${model}: tab present`)) continue;
+      const driver = getDriver(model);
+      const wantsProject = projectProviders.includes(model);
+      const pick = process.env[`E2E_DRIVER_MODEL_${model.toUpperCase()}`];
+      const modes = (process.env[`E2E_DRIVER_MODES_${model.toUpperCase()}`] || '')
+        .split(',').map((s) => s.trim()).filter(Boolean);
+
+      // 1. ensureChat: named project (where it exists) + verified model pick
+      //    + any PAUSE-P-approved mode toggles.
+      const setup = await driver.ensureChat(page, {
+        project: wantsProject ? projectName : undefined,
+        model: pick || undefined,
+        modes: Object.fromEntries(modes.map((m) => [m, true])),
+      });
+      const failedSteps = setup.steps.filter((s) => !s.ok)
+        .map((s) => `${s.action}: ${s.evidence}`).join('; ');
+      assertInto(details, setup.ok, `${model}: ensureChat ok${failedSteps ? ` (failed: ${failedSteps})` : ''}`);
+      if (wantsProject) {
+        assertInto(details, setup.verified.project?.ok === true,
+          `${model}: chat verified INSIDE project "${projectName}" (${setup.verified.project?.evidence})`);
+        assertInto(details, !setup.warnings.some((w) => w.code === 'project_not_found'),
+          `${model}: no project_not_found for an existing project`);
+      }
+      if (pick) {
+        assertInto(details, setup.verified.model?.ok === true,
+          `${model}: model "${pick}" verified (${setup.verified.model?.evidence})`);
+      }
+      for (const mode of modes) {
+        assertInto(details, setup.verified[`mode:${mode}`]?.ok === true,
+          `${model}: mode "${mode}" verified (${setup.verified[`mode:${mode}`]?.evidence})`);
+      }
+
+      // 2. 1-line round-trip in THIS chat through the production send path.
+      const token = `DRIVER_GATE_${model.toUpperCase()}_${randomBytes(3).toString('hex')}`;
+      const initial = (await findAll(page, SELECTORS[model].output)).length;
+      let out = '';
+      try {
+        await sendToModel(browserService, model, `Reply with exactly this token and nothing else: ${token}`);
+        const done = await waitForComplete(browserService, page, model, initial, 240000);
+        assertInto(details, done.complete, `${model}: round-trip completed in ${done.time}ms`);
+        if (done.complete) out = await getOutput(browserService, model);
+      } catch (e) {
+        assertInto(details, false, `${model}: round-trip failed (${e.message})`);
+      }
+      assertInto(details, out.includes(token), `${model}: response echoes token ("${out.slice(0, 80).replace(/\n/g, ' ')}")`);
+
+      // 3. Missing project → typed warning + normal-chat fallback (0 sends);
+      // leaves the tab on a fresh chat for the next provider run.
+      const missing = await driver.ensureChat(page, {
+        project: `zz-nonexistent-${randomBytes(3).toString('hex')}`,
+      });
+      assertInto(details, missing.warnings.some((w) => w.code === 'project_not_found'),
+        `${model}: missing project yields typed project_not_found`);
+      assertInto(details, missing.ok, `${model}: missing-project fallback lands in a usable chat`);
+    }
+  } finally {
+    markConsensusEnd();
+    await browserService.disconnect();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -594,6 +694,7 @@ export const GATES = {
   doublestart: gateDoubleStart,
   coldstart: gateColdStart,
   compression: gateCompression,
+  drivers: gateDrivers,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

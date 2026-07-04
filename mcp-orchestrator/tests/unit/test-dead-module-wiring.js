@@ -35,8 +35,12 @@ function assert(condition, name) {
 }
 
 // --- mock page: the exact Playwright surface the round machinery uses ---
+// Composer-accurate for PR-9 send-verification: insertText fills the
+// composer (receipt), the submit button empties it (release), and mode-pill
+// indicator selectors never match.
 function mockModelPage({ loggedIn = true, answer = 'mock answer', neverResponds = false, selectorFlake = false } = {}) {
   let sent = false;
+  let composer = '';
   const spy = { insertTextCalls: 0 };
   const makeEl = (text) => ({
     evaluate: async () => Math.random().toString(36),
@@ -44,13 +48,25 @@ function mockModelPage({ loggedIn = true, answer = 'mock answer', neverResponds 
     isVisible: async () => false,
     click: async () => {},
   });
+  const inputEl = { ...makeEl(''), innerText: async () => composer };
+  const submitEl = {
+    ...makeEl('send'),
+    click: async () => {
+      if (composer) { composer = ''; sent = true; }
+    },
+  };
   const page = {
     url: () => (loggedIn ? 'https://claude.ai/chat/mock' : 'https://claude.ai/login?from=logout'),
-    $: async () => (loggedIn && !selectorFlake ? makeEl('input') : null),
+    $: async (sel) => {
+      if (!loggedIn || selectorFlake) return null;
+      if (sel.includes('aria-pressed')) return null; // no research pill/adornments
+      if (sel.startsWith('button')) return submitEl;
+      return inputEl;
+    },
     $$: async () => (sent && !neverResponds ? [makeEl('old'), makeEl(answer)] : [makeEl('old')]),
     keyboard: {
       press: async () => {},
-      insertText: async () => { spy.insertTextCalls++; sent = true; },
+      insertText: async (t) => { spy.insertTextCalls++; composer += t; },
     },
     waitForTimeout: async () => {},
     reload: async () => {},

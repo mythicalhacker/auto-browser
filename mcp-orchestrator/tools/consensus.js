@@ -57,32 +57,148 @@ function loadState() {
 
 // --- Core consensus functions (receive browserService via parameter) ---
 
-export async function sendToModel(browserService, model, prompt) {
-  const page = browserService.getPage(model);
-  if (!page) throw new Error(`${model} tab not found`);
-  const sel = SELECTORS[model];
+// --- Send-verification (PR-9) -----------------------------------------------
+// A silent send was observed live (2026-07-04): insertText landed in a stale
+// editor and the submit click was a no-op, so waitForComplete later "passed"
+// on stale DOM. Two-phase verification:
+//   RECEIPT — after insertText, the composer must CONTAIN the prompt tail
+//   before submit is ever clicked (an empty composer means the insert itself
+//   missed — the exact observed race — and a submit click on it is a no-op).
+//   RELEASE — after submit, the composer must stop containing the tail
+//   (every provider clears its composer on a registered send).
+// All text comparison is whitespace-normalized: block editors re-render '\n'
+// as paragraph breaks that innerText reads back as '\n\n', so raw includes()
+// would never match multi-line prompts.
 
+const SEND_VERIFY_MS = Number(process.env.SEND_VERIFY_MS) || 5000;
+const SEND_RECEIPT_MS = Number(process.env.SEND_RECEIPT_MS) || 2000;
+const SEND_VERIFY_POLL_MS = 250;
+
+const normWs = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+
+function promptTail(prompt) {
+  // A distinctive tail of the NORMALIZED prompt: composers show the full
+  // prompt, and 80 chars will not collide with placeholder text.
+  return normWs(prompt).slice(-80).trim();
+}
+
+async function composerText(page, sel) {
+  const m = await findFirst(page, sel.input);
+  if (!m) return null; // composer not found right now — no evidence either way
+  try {
+    return await m.element.innerText();
+  } catch {
+    return null;
+  }
+}
+
+/** true/false when the composer was readable, null when it never was. */
+async function pollComposerTail(page, sel, tail, wantPresent, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let sawComposer = false;
+  for (;;) {
+    const text = await composerText(page, sel);
+    if (text !== null) {
+      sawComposer = true;
+      const has = normWs(text).includes(tail);
+      if (has === wantPresent) return true;
+    }
+    if (Date.now() >= deadline) return sawComposer ? false : null;
+    await page.waitForTimeout(SEND_VERIFY_POLL_MS);
+  }
+}
+
+async function composerHoldsAdornment(page, model) {
+  // e.g. ChatGPT's deep-research pill lives INSIDE the composer; select-all +
+  // Backspace would silently strip a configured research mode.
+  const indicator = getProvider(model)?.selectors?.researchActiveIndicator ?? [];
+  if (indicator.length === 0) return false;
+  return !!(await findFirst(page, indicator));
+}
+
+async function clearComposer(page, sel) {
+  const m = await findFirst(page, sel.input);
+  if (!m) return;
+  await m.element.click({ force: true });
+  await page.waitForTimeout(CONFIG.timeouts.microDelay);
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(CONFIG.timeouts.microDelay);
+}
+
+async function insertPrompt(page, model, sel, prompt) {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
-
   const inputMatch = await findFirst(page, sel.input);
   if (!inputMatch) throw new Error(`${model}: no input element found`);
   await inputMatch.element.click({ force: true });
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
-
   // insertText avoids the OS clipboard: parallel sends can't cross-paste each
   // other's prompts, background tabs don't need document focus, and there is
   // no platform-specific paste shortcut. Unlike page.type, embedded newlines
   // are inserted as text rather than triggering submit.
   await page.keyboard.insertText(prompt);
-  // Give the UI framework a tick to process the input event and enable the
-  // send button — the submit selectors don't exclude disabled buttons and
-  // click({force}) on a disabled button is a silent no-op.
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
+}
 
+async function clickSubmit(page, sel) {
   const submitMatch = await findFirst(page, sel.submit);
   if (submitMatch) await submitMatch.element.click({ force: true });
   else await page.keyboard.press("Enter");
+}
+
+export async function sendToModel(browserService, model, prompt) {
+  const page = browserService.getPage(model);
+  if (!page) throw new Error(`${model} tab not found`);
+  const sel = SELECTORS[model];
+  const tail = promptTail(prompt);
+
+  // Phase 1 — insert with RECEIPT: the tail must appear in the composer
+  // before any submit. One guarded re-insert: only when the composer is
+  // readable and carries no in-composer adornment (research pill) that a
+  // clear would destroy.
+  await insertPrompt(page, model, sel, prompt);
+  if (tail) {
+    let received = await pollComposerTail(page, sel, tail, true, SEND_RECEIPT_MS);
+    if (received === null) {
+      throw new Error(`${model}: composer unreadable after insert — cannot verify send`);
+    }
+    if (received === false) {
+      if (await composerHoldsAdornment(page, model)) {
+        throw new Error(`${model}: prompt did not register and composer holds a mode pill — refusing to clear it`);
+      }
+      await clearComposer(page, sel);
+      await insertPrompt(page, model, sel, prompt);
+      received = await pollComposerTail(page, sel, tail, true, SEND_RECEIPT_MS);
+      if (received !== true) {
+        throw new Error(`${model}: prompt did not register in composer (insert failed twice)`);
+      }
+    }
+  }
+
+  // Give the UI framework a tick to enable the send button — the submit
+  // selectors don't exclude disabled buttons and click({force}) on a
+  // disabled button is a silent no-op.
+  await page.waitForTimeout(CONFIG.timeouts.microDelay);
+  await clickSubmit(page, sel);
+
+  // Phase 2 — RELEASE: receipt confirmed the prompt is in the composer, so
+  // "tail gone" now truly implies the send registered. If the composer still
+  // holds the tail, the submit never fired — retry the SUBMIT only (the
+  // prompt is still sitting there; re-inserting is what could double-send).
+  if (tail) {
+    let released = await pollComposerTail(page, sel, tail, false, SEND_VERIFY_MS);
+    if (released === null) {
+      throw new Error(`${model}: send not verified (composer state ambiguous after submit)`);
+    }
+    if (released === false) {
+      await clickSubmit(page, sel);
+      released = await pollComposerTail(page, sel, tail, false, SEND_VERIFY_MS);
+      if (released !== true) {
+        throw new Error(`${model}: send not registered after retry (composer never cleared)`);
+      }
+    }
+  }
 
   recordUsage(model); // per-platform send counter, surfaced in health_check
   return true;

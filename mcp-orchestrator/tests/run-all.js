@@ -108,6 +108,20 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Send Verification",
+    file: "unit/test-send-verification.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
+    name: "Drivers",
+    file: "unit/test-drivers.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Dead-Module Wiring",
     file: "unit/test-dead-module-wiring.js",
     critical: false,

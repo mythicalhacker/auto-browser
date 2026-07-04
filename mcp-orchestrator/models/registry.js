@@ -41,15 +41,48 @@ const DEFAULTS = {
       submit: ['button[aria-label="Send message"]', 'button[aria-label="Send Message"]', 'button[aria-label="Send"]'],
       output: ['.font-claude-response .standard-markdown'],
       streaming: ['[data-is-streaming="true"]'],
-      // Research-train slots (populated by live selector discovery in PR-9+).
-      modelPicker: [],
-      modeToggles: {},
-      researchToggle: [],
-      projectNav: [],
-      quotaBanner: [],
+      // Live-discovered 2026-07-04 (Base-UI 'cds' components; generated ids
+      // like base-ui-_r_* are unstable — attribute selectors only).
+      modelPicker: ['[data-testid="model-selector-dropdown"]', 'button[aria-label^="Model:"]'],
+      modelPickerItem: ['[role="menu"] [role="menuitemradio"]', '[data-cds="Menu"] [role="menuitemradio"]'],
+      modelPickerLabel: ['[data-testid="model-selector-dropdown"]', 'button[aria-label^="Model:"]'],
+      modeToggles: {
+        effort: ['[data-testid="effort-menu-trigger"]'],
+        effortActiveHint: 'Inside the model picker; options [data-testid^="effort-option-"] '
+          + '(low/medium/high/xhigh/max), current has aria-checked=true; also shows as the '
+          + 'trailing badge in the model-selector button text.',
+        // webSearch is documented as a HINT only: its checkbox lives inside
+        // the plus menu and the row selector alone is text-blind (it would
+        // click whatever checkbox comes first) — no direct-toggle array.
+        webSearchHint: 'Row in the plus menu (button[aria-label="Add files, connectors, and more"]), '
+          + 'match innerText "Web search"; ON = aria-checked=true. No always-visible indicator outside the menu.',
+        extendedThinkingActiveHint: 'NOT PRESENT in the July 2026 UI — thinking is built in; '
+          + 'the Effort submenu is the closest user control.',
+      },
+      researchToggle: ['button[aria-label="Research mode"]'],
+      researchMenu: {
+        opener: ['button[aria-label="Add files, connectors, and more"]'],
+        item: ['[role="menu"] [role="menuitemcheckbox"]'],
+        matchText: 'Research',
+        closeBy: 'escape',
+      },
+      researchActiveIndicator: ['button[aria-label="Research mode"][aria-pressed="true"]'],
+      projectNav: {
+        listUrl: 'https://claude.ai/projects',
+        projectCard: ['a[href^="/project/"]', 'a[href*="/project/"]'],
+        newChatInProject: ['[data-testid="chat-input"]', 'div[aria-label="Write your prompt to Claude"]'],
+        projectHeader: ['[data-testid="page-header"] a[href*="/project/"]'],
+        inProjectUrlFragment: '/project/',
+      },
+      quotaBanner: ['div[role="status"] span.text-body', 'div[role="status"]'],
+      userMessage: ['[data-testid="user-message"]'],
     },
     loginUrlPatterns: [...COMMON_LOGIN_URL_PATTERNS],
-    capabilities: { deepResearch: true, projects: true, modelChoices: [] },
+    capabilities: {
+      deepResearch: true,
+      projects: true,
+      modelChoices: ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5'],
+    },
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 900, windowMs: 5 * 60 * 60 * 1000, name: '5 hours' },
@@ -68,17 +101,48 @@ const DEFAULTS = {
       submit: ['button[aria-label="Send prompt"]', 'button[data-testid="send-button"]', 'button[data-testid="composer-send-button"]'],
       output: ['[data-message-author-role="assistant"] .markdown', '[data-message-author-role="assistant"]'],
       streaming: ['button[aria-label="Stop streaming"]', 'button[data-testid="stop-button"]'],
-      modelPicker: [],
-      modeToggles: {},
+      // Live-discovered 2026-07-04. The picker is the composer pill (no
+      // header switcher); menu items render with newlines ('Pro\nExtended')
+      // so matching must whitespace-normalize.
+      modelPicker: ['form[data-type="unified-composer"] button.__composer-pill[aria-haspopup="menu"]', 'button.__composer-pill[aria-haspopup="menu"]'],
+      modelPickerItem: ['[data-testid="composer-intelligence-picker-content"] [role="menuitemradio"]', '[role="menu"][data-state="open"] [role="menuitemradio"]'],
+      modelPickerLabel: ['form[data-type="unified-composer"] button.__composer-pill[aria-haspopup="menu"]', 'button.__composer-pill[aria-haspopup="menu"]'],
+      modeToggles: {
+        proEffort: ['[data-testid="composer-intelligence-pro-thinking-effort-trigger"]'],
+        proEffortActiveHint: 'Hover the checked Pro row inside the intelligence picker, then CLICK '
+          + 'the trigger; submenu is a second [role="menu"][data-state="open"] with Pro Standard / '
+          + 'Pro Extended menuitemradio (aria-checked marks current).',
+        temporaryChat: ['#page-header button[aria-label="Turn on temporary chat"]'],
+      },
+      // Deep research is a PILL INSERTER, not a toggle: clicking the row again
+      // adds a second pill — always check researchActiveIndicator first. The
+      // plus panel ignores Escape; close by re-clicking the opener.
       researchToggle: [],
-      projectNav: [],
-      quotaBanner: [],
+      researchMenu: {
+        opener: ['[data-testid="composer-plus-btn"]'],
+        item: ['div.popover div.__menu-item'],
+        matchText: 'Deep research',
+        closeBy: 'reopen',
+      },
+      researchActiveIndicator: [
+        '#prompt-textarea [data-inline-selection-pill][data-id="connector:connector_openai_deep_research"]',
+        '#prompt-textarea [data-inline-selection-pill][data-keyword="Deep research"]',
+      ],
+      projectNav: {
+        listUrl: 'https://chatgpt.com/projects',
+        projectCard: ['main div[role="row"][data-page-table-selectable-row="true"]', '[class*="project-unfurl-row"] div[data-sidebar-item="true"][role="button"]'],
+        newChatInProject: ['#prompt-textarea', 'form[data-type="unified-composer"] div[contenteditable="true"]'],
+        projectHeader: ['#page-header a[href$="/project"]', '[data-testid="project-modal-trigger"]'],
+        inProjectUrlFragment: '/g/g-p-',
+      },
+      quotaBanner: ['[data-testid*="limit"]', '[data-testid*="banner"]'],
+      userMessage: ['[data-message-author-role="user"]'],
     },
     loginUrlPatterns: [...COMMON_LOGIN_URL_PATTERNS],
     capabilities: {
       deepResearch: true,
       projects: true,
-      modelChoices: [],
+      modelChoices: ['Instant', 'Medium', 'High', 'Extra High', 'Pro Standard', 'Pro Extended', 'GPT-5.5', 'GPT-5.4', 'GPT-5.3', 'o3'],
       // Thinking-mode workaround: response DOM empties after streaming; a
       // reload forces React to re-render from server state.
       reloadOnEmptyOutput: true,
@@ -103,14 +167,49 @@ const DEFAULTS = {
       submit: ['button[aria-label="Send message"]', 'button.send-button', 'button[aria-label="Submit"]'],
       output: ['.model-response-text .markdown-main-panel', 'message-content .markdown', '.response-content'],
       streaming: ['button[aria-label="Stop response"]', 'button[aria-label="Stop"]'],
-      modelPicker: [],
-      modeToggles: {},
+      // Live-discovered 2026-07-04 ('luminous' UI). Picker is the mode pill
+      // on the RIGHT inside the composer; menu ids are per-session
+      // (ng-menu-*), bard-mode-option testid hashes are opaque — match model
+      // names by innerText. The label pill shows the SHORT name ('Pro').
+      modelPicker: ['button[data-test-id="bard-mode-menu-button"]', 'button[aria-label^="Open mode picker"]'],
+      modelPickerItem: ['gem-menu-item[data-test-id^="bard-mode-option-"]', 'gem-menu[id^="ng-menu"] gem-menu-item[role="menuitem"]'],
+      modelPickerLabel: ['bard-mode-switcher .picker-primary-text', 'button[data-test-id="bard-mode-menu-button"] .picker-primary-text'],
+      modeToggles: {
+        // Thinking level lives INSIDE the model picker; the gemini driver
+        // carries the two-level flow as a quirk.
+        extendedThinking: ['gem-menu-item[value="thinking_level"]'],
+        extendedThinkingActiveHint: 'Open the model picker first; current level readable from '
+          + 'gem-menu-item[value="thinking_level"] .sublabel (Standard/Extended); clicking opens a '
+          + 'second gem-menu — match items by innerText, active carries class "selected". Escape twice.',
+      },
       researchToggle: [],
-      projectNav: [],
-      quotaBanner: [],
+      researchMenu: {
+        opener: ['button[aria-label="Upload and tools"]'],
+        item: ['button.toolbox-drawer-item-list-button[role="menuitemcheckbox"]', '.cdk-overlay-container button[role="menuitemcheckbox"]'],
+        matchText: 'Deep Research',
+        closeBy: 'escape',
+      },
+      researchActiveIndicator: [
+        '[data-test-id="deselect-drawer-item-gem-button"]',
+        'button[aria-label="Deselect Deep Research"]',
+      ],
+      // "Projects" on Gemini = Notebooks (sidebar entries on /app).
+      projectNav: {
+        listUrl: 'https://gemini.google.com/app',
+        projectCard: ['[data-test-id="project-item-button-gem"]', 'a[href^="/notebook/"]'],
+        newChatInProject: ['rich-textarea .ql-editor', '.ql-editor'],
+        projectHeader: ['h1[data-test-id="edu-notebook-project-name"]'],
+        inProjectUrlFragment: '/notebook/',
+      },
+      quotaBanner: ['gemini-quota-banner', '.upgrade-to-continue', '[data-test-id="announcement-banner-container"]'],
+      userMessage: ['user-query', '.query-text'],
     },
     loginUrlPatterns: [...COMMON_LOGIN_URL_PATTERNS],
-    capabilities: { deepResearch: true, projects: false, modelChoices: [] },
+    capabilities: {
+      deepResearch: true,
+      projects: true, // notebooks
+      modelChoices: ['3.1 Flash-Lite', '3.5 Flash', '3.1 Pro'],
+    },
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 100, windowMs: 24 * 60 * 60 * 1000, name: '24 hours' },
@@ -170,11 +269,51 @@ function validateProvider(name, d, problems) {
     for (const key of ['input', 'submit', 'output', 'streaming']) {
       if (!isStringArray(sel[key]) || sel[key].length === 0) p(`"selectors.${key}" must be a non-empty array of strings`);
     }
-    for (const key of ['modelPicker', 'researchToggle', 'projectNav', 'quotaBanner']) {
+    for (const key of ['modelPicker', 'modelPickerItem', 'modelPickerLabel', 'researchToggle',
+      'researchActiveIndicator', 'quotaBanner', 'userMessage']) {
       if (sel[key] !== undefined && !isStringArray(sel[key])) p(`"selectors.${key}" must be an array of strings`);
     }
-    if (sel.modeToggles !== undefined && (typeof sel.modeToggles !== 'object' || Array.isArray(sel.modeToggles))) {
-      p('"selectors.modeToggles" must be an object');
+    if (sel.modeToggles !== undefined) {
+      if (!isPlainObject(sel.modeToggles)) p('"selectors.modeToggles" must be an object');
+      else {
+        for (const [k, v] of Object.entries(sel.modeToggles)) {
+          if (!isStringArray(v) && typeof v !== 'string') {
+            p(`"selectors.modeToggles.${k}" must be a selector array (or a hint string)`);
+          }
+        }
+      }
+    }
+    if (sel.projectNav !== undefined) {
+      if (!isPlainObject(sel.projectNav)) p('"selectors.projectNav" must be an object');
+      else {
+        if (sel.projectNav.listUrl !== undefined && !isHttpUrl(sel.projectNav.listUrl)) {
+          p('"selectors.projectNav.listUrl" must be an http(s) URL');
+        }
+        if (sel.projectNav.inProjectUrlFragment !== undefined
+          && (typeof sel.projectNav.inProjectUrlFragment !== 'string' || !sel.projectNav.inProjectUrlFragment)) {
+          p('"selectors.projectNav.inProjectUrlFragment" must be a non-empty string');
+        }
+        for (const key of ['projectCard', 'newChatInProject', 'projectHeader']) {
+          if (sel.projectNav[key] !== undefined && !isStringArray(sel.projectNav[key])) {
+            p(`"selectors.projectNav.${key}" must be an array of strings`);
+          }
+        }
+      }
+    }
+    if (sel.researchMenu !== undefined) {
+      const rm = sel.researchMenu;
+      if (!isPlainObject(rm)) p('"selectors.researchMenu" must be an object');
+      else {
+        for (const key of ['opener', 'item']) {
+          if (!isStringArray(rm[key]) || rm[key].length === 0) {
+            p(`"selectors.researchMenu.${key}" must be a non-empty array of strings`);
+          }
+        }
+        if (typeof rm.matchText !== 'string' || !rm.matchText) p('"selectors.researchMenu.matchText" must be a non-empty string');
+        if (rm.closeBy !== undefined && !['escape', 'reopen'].includes(rm.closeBy)) {
+          p('"selectors.researchMenu.closeBy" must be "escape" or "reopen"');
+        }
+      }
     }
   }
   const cap = d.capabilities;
