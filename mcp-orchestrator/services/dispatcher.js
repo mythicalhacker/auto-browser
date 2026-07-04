@@ -2,10 +2,11 @@
 import { updateTask, areDependenciesMet, listTasks } from '../tools/task-queue.js';
 import { sendToModel, waitForComplete, getOutput, runConsensusRound } from '../tools/consensus.js';
 import { SELECTORS } from '../config.js';
+import { providerNames } from '../models/registry.js';
 import { findAll } from '../utils/selectors.js';
 import { checkLogin } from '../utils/login-check.js';
 
-const MODELS = ['claude', 'chatgpt', 'gemini'];
+const MODELS = providerNames();
 
 // Model router: decide which model(s) to target for 'auto' tasks
 function resolveTarget(target) {

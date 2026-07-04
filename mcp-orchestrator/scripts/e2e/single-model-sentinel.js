@@ -11,6 +11,11 @@ import { randomBytes } from 'crypto';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 mkdirSync(join(__dirname, '.state'), { recursive: true });
 if (!process.env.STATE_FILE) process.env.STATE_FILE = join(__dirname, '.state', 'sentinel-single.json');
+// Same invariant as run-e2e.js: the harness measures registry DEFAULTS, never
+// a developer's ~/.auto-browser/registry.json (path intentionally absent).
+if (!process.env.REGISTRY_FILE) {
+  process.env.REGISTRY_FILE = join(__dirname, '.state', 'no-registry-override.json');
+}
 
 const MODEL = process.argv[2] || 'gemini';
 

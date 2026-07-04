@@ -31,11 +31,14 @@ function assert(condition, name) {
 const OUR_VARS = [
   'CDP_URL', 'STATE_FILE', 'CHROME_PATH', 'CHROME_USER_DATA', 'AUTO_LAUNCH_CHROME',
   'TIMEOUT_RESPONSE', 'TIMEOUT_RESPONSE_CLAUDE', 'TIMEOUT_RESPONSE_CHATGPT', 'TIMEOUT_RESPONSE_GEMINI',
+  'REGISTRY_FILE',
 ];
 
 function probe(env = {}) {
   const clean = { ...process.env };
   for (const k of OUR_VARS) delete clean[k];
+  // Registry DEFAULTS only — never a developer's ~/.auto-browser/registry.json.
+  clean.REGISTRY_FILE = join(__dirname, '.no-registry-override.json');
   const r = spawnSync(process.execPath, ['-e', `
     import(${JSON.stringify(CONFIG_URL)}).then(({ CONFIG, ENTRY_URLS }) => {
       console.log(JSON.stringify({

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
 import { chromium } from 'playwright';
 import { CONFIG, PATTERNS } from '../../config.js';
+import { getRegistry } from '../../models/registry.js';
 import { checkAllLogins } from '../../utils/login-check.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,11 +21,11 @@ const CHROME_BIN =
     ? process.env.CHROME_PATH
     : '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
-export const MODEL_URLS = {
-  claude: 'https://claude.ai',
-  chatgpt: 'https://chatgpt.com',
-  gemini: 'https://gemini.google.com',
-};
+// Entry URLs per provider, straight from the registry (keys double as the
+// harness's canonical model set).
+export const MODEL_URLS = Object.fromEntries(
+  Object.entries(getRegistry()).map(([model, d]) => [model, d.entryUrl])
+);
 
 export async function cdpReady(timeoutMs = 1500) {
   return (await cdpVersion(timeoutMs)) !== null;
@@ -200,9 +201,11 @@ export async function freshModelChats() {
       const url = page.url();
       for (const [model, pattern] of Object.entries(PATTERNS)) {
         if (url.includes(pattern)) {
-          // Mirror the product's discovery rule: claude.ai/chrome/* pages are
-          // NOT model tabs (browser-service excludes them) — never navigate one.
-          if (model === 'claude' && url.includes('/chrome/')) continue;
+          // Mirror the product's discovery rule: excluded paths (e.g. the
+          // claude.ai/chrome/* extension pages) are NOT model tabs — never
+          // navigate one.
+          const excludes = getRegistry()[model]?.excludePathPatterns ?? [];
+          if (excludes.some((frag) => url.includes(frag))) continue;
           await page.goto(MODEL_URLS[model], { waitUntil: 'domcontentloaded', timeout: 45000 });
           await page.waitForTimeout(3000); // SPA settle before selector queries
         }

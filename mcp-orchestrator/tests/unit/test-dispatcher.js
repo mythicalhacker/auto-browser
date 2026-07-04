@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Dispatcher Unit Tests
  * Validates tool definitions, dispatch routing (single-model, consensus, auto),

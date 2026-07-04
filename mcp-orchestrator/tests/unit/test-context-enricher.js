@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Context Enricher Unit Tests
  * Validates enrichContext() and buildEnrichedPrompt() with mock objects — no Chrome needed.

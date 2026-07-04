@@ -4,6 +4,7 @@ import { dirname } from "path";
 import { ConsensusBarrier } from "../utils/barrier.js";
 import { findFirst, findAll } from "../utils/selectors.js";
 import { CONFIG, SELECTORS } from "../config.js";
+import { getProvider, providerNames } from "../models/registry.js";
 import { getHealthReport, formatHealthReport } from "../utils/health-check.js";
 import { compressForCrossPollination } from "../utils/context-compression.js";
 import { checkLogin } from "../utils/login-check.js";
@@ -122,16 +123,18 @@ export async function getOutput(browserService, model) {
   if (els.length === 0) throw new Error("No output found");
   let text = (await els[els.length - 1].innerText()).trim();
 
-  // ChatGPT thinking-mode workaround: response DOM empties after streaming.
-  // A page reload forces React to re-render from server state.
-  if (!text && model === 'chatgpt') {
-    console.error('[getOutput] ChatGPT returned empty text, reloading page to recover...');
+  // Thinking-mode workaround (registry capability reloadOnEmptyOutput):
+  // response DOM empties after streaming. A page reload forces React to
+  // re-render from server state.
+  if (!text && getProvider(model)?.capabilities?.reloadOnEmptyOutput) {
+    const label = getProvider(model)?.displayName || model;
+    console.error(`[getOutput] ${label} returned empty text, reloading page to recover...`);
     await page.reload({ waitUntil: 'networkidle' });
     await page.waitForTimeout(3000);
     const freshEls = await findAll(page, SELECTORS[model].output);
     if (freshEls.length === 0) throw new Error("No output found after reload");
     text = (await freshEls[freshEls.length - 1].innerText()).trim();
-    if (!text) throw new Error("ChatGPT response still empty after reload");
+    if (!text) throw new Error(`${label} response still empty after reload`);
   }
 
   return text;
@@ -494,7 +497,7 @@ function getFullResults() {
 const CONSENSUS_TOOLS = [
   {
     name: "start_consensus",
-    description: "Start autonomous consensus workflow. Sends prompt to all 3 models, waits for complete responses, generates comparison, repeats until consensus. Runs in background - check status with get_consensus_status.",
+    description: `Start autonomous consensus workflow. Sends prompt to all ${providerNames().length} models, waits for complete responses, generates comparison, repeats until consensus. Runs in background - check status with get_consensus_status.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -527,7 +530,7 @@ const CONSENSUS_TOOLS = [
   },
   {
     name: "send_single_round",
-    description: "Send prompt to all 3 models and wait for responses (single round, no iteration)",
+    description: `Send prompt to all ${providerNames().length} models and wait for responses (single round, no iteration)`,
     inputSchema: {
       type: "object",
       properties: {

@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * State Guard Contract Tests — Stage 4 (PR-4) SCAFFOLD
  *

@@ -17,6 +17,7 @@ import {
   ensureChrome, cdpReady, weSpawnedChrome, ensureModelTabs, openModelTabs,
   reduceModelTabsTo, loginStatus, freshModelChats, adoptRunningChrome, MODEL_URLS,
 } from './chrome.js';
+import { providerNames } from '../../models/registry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE = join(STATE_DIR, 'ledger.json');
@@ -30,9 +31,7 @@ const PAUSE_MS = 120000; // minimum gap between consensus runs
 // sets only the global var.
 const responseTimeoutEnv = (ms) => ({
   TIMEOUT_RESPONSE: ms,
-  TIMEOUT_RESPONSE_CLAUDE: ms,
-  TIMEOUT_RESPONSE_CHATGPT: ms,
-  TIMEOUT_RESPONSE_GEMINI: ms,
+  ...Object.fromEntries(providerNames().map((m) => [`TIMEOUT_RESPONSE_${m.toUpperCase()}`, ms])),
 });
 
 // --- ledger -----------------------------------------------------------------
@@ -468,7 +467,7 @@ export async function gateColdStart(log) {
   }
 
   await pauseBetweenConsensusRuns(log);
-  const models = ['claude', 'chatgpt', 'gemini'];
+  const models = providerNames();
   charge(models, 1);
 
   const profile = join(homedir(), '.auto-browser', 'chrome-profile');
@@ -488,7 +487,7 @@ export async function gateColdStart(log) {
     assertInto(details, conn.isError !== true, 'connect_browser succeeded from a cold port');
     const connText = conn.content?.[0]?.text || '';
     const found = models.filter((m) => connText.includes(m));
-    assertInto(details, found.length === 3, `all 3 model tabs present after auto-launch (${connText.trim()})`);
+    assertInto(details, found.length === models.length, `all ${models.length} model tabs present after auto-launch (${connText.trim()})`);
 
     // The RPC blocks for the whole round; ceiling is 240s per model.
     const round = await client.callTool('send_single_round', {

@@ -1,6 +1,13 @@
-// config.js — Centralized configuration for MCP Orchestrator
+// config.js — Centralized configuration for MCP Orchestrator.
+// Provider-specific facts (URL patterns, entry URLs, selectors, per-model
+// timeout defaults) live in models/registry.js; this module layers env-var
+// precedence on top and re-exports the legacy provider-keyed views so
+// existing imports keep working unchanged.
 import { join } from 'path';
 import { homedir } from 'os';
+import {
+  patternsView, entryUrlsView, selectorsView, responseTimeoutDefaults, providerNames,
+} from './models/registry.js';
 
 // Runtime artifacts (the debug profile with live logins, consensus state)
 // live OUTSIDE the repo by default.
@@ -14,6 +21,22 @@ function defaultChromePath() {
   }
 }
 
+// Per-model response ceilings: extended-thinking models (GPT 5.5 Pro et al.)
+// routinely think for minutes, so the limit must fit the slowest normal
+// response, not the median. Precedence: TIMEOUT_RESPONSE_<MODEL> env >
+// TIMEOUT_RESPONSE env > registry descriptor default. A per-call
+// response_timeout_ms tool argument beats all of these.
+function buildResponseByModel() {
+  const defaults = responseTimeoutDefaults();
+  return Object.freeze(Object.fromEntries(providerNames().map((model) => [
+    model,
+    Number(process.env[`TIMEOUT_RESPONSE_${model.toUpperCase()}`])
+      || Number(process.env.TIMEOUT_RESPONSE)
+      || defaults[model]
+      || 300000,
+  ])));
+}
+
 export const CONFIG = Object.freeze({
   cdpUrl: process.env.CDP_URL || 'http://localhost:9222',
   stateFile: process.env.STATE_FILE || join(AUTO_BROWSER_HOME, 'consensus_state.json'),
@@ -22,16 +45,7 @@ export const CONFIG = Object.freeze({
   autoLaunchChrome: process.env.AUTO_LAUNCH_CHROME !== '0',
   timeouts: Object.freeze({
     response: Number(process.env.TIMEOUT_RESPONSE) || 120000,
-    // Per-model response ceilings: extended-thinking models (GPT 5.5 Pro et
-    // al.) routinely think for minutes, so the limit must fit the slowest
-    // normal response, not the median. Precedence: TIMEOUT_RESPONSE_<MODEL>
-    // env > TIMEOUT_RESPONSE env > per-model default. A per-call
-    // response_timeout_ms tool argument beats all of these.
-    responseByModel: Object.freeze({
-      claude: Number(process.env.TIMEOUT_RESPONSE_CLAUDE) || Number(process.env.TIMEOUT_RESPONSE) || 300000,
-      chatgpt: Number(process.env.TIMEOUT_RESPONSE_CHATGPT) || Number(process.env.TIMEOUT_RESPONSE) || 600000,
-      gemini: Number(process.env.TIMEOUT_RESPONSE_GEMINI) || Number(process.env.TIMEOUT_RESPONSE) || 300000,
-    }),
+    responseByModel: buildResponseByModel(),
     navigation: Number(process.env.TIMEOUT_NAVIGATION) || 30000,
     action: Number(process.env.TIMEOUT_ACTION) || 10000,
     stabilityCheck: 1000,
@@ -39,36 +53,13 @@ export const CONFIG = Object.freeze({
   }),
 });
 
-export const PATTERNS = Object.freeze({
-  claude: 'claude.ai',
-  chatgpt: 'chatgpt.com',
-  gemini: 'gemini.google.com',
-});
+// Legacy registry views. The registry deep-freezes descriptor internals
+// (selector arrays are already frozen); freeze the view wrappers here.
+export const PATTERNS = Object.freeze(patternsView());
 
 // Entry URLs used when the auto-launched Chrome is missing a model tab.
-export const ENTRY_URLS = Object.freeze({
-  claude: 'https://claude.ai',
-  chatgpt: 'https://chatgpt.com',
-  gemini: 'https://gemini.google.com',
-});
+export const ENTRY_URLS = Object.freeze(entryUrlsView());
 
-export const SELECTORS = Object.freeze({
-  claude: Object.freeze({
-    input: Object.freeze(['.ProseMirror', 'div[contenteditable="true"]']),
-    submit: Object.freeze(['button[aria-label="Send message"]', 'button[aria-label="Send Message"]', 'button[aria-label="Send"]']),
-    output: Object.freeze(['.font-claude-response .standard-markdown']),
-    streaming: Object.freeze(['[data-is-streaming="true"]']),
-  }),
-  chatgpt: Object.freeze({
-    input: Object.freeze(['#prompt-textarea', 'textarea[name="prompt-textarea"]', 'div[contenteditable="true"]']),
-    submit: Object.freeze(['button[aria-label="Send prompt"]', 'button[data-testid="send-button"]', 'button[data-testid="composer-send-button"]']),
-    output: Object.freeze(['[data-message-author-role="assistant"] .markdown', '[data-message-author-role="assistant"]']),
-    streaming: Object.freeze(['button[aria-label="Stop streaming"]', 'button[data-testid="stop-button"]']),
-  }),
-  gemini: Object.freeze({
-    input: Object.freeze(['div[contenteditable="true"].ql-editor', 'rich-textarea div[contenteditable="true"]', 'div[contenteditable="true"]']),
-    submit: Object.freeze(['button[aria-label="Send message"]', 'button.send-button', 'button[aria-label="Submit"]']),
-    output: Object.freeze(['.model-response-text .markdown-main-panel', 'message-content .markdown', '.response-content']),
-    streaming: Object.freeze(['button[aria-label="Stop response"]', 'button[aria-label="Stop"]']),
-  }),
-});
+const selectors = selectorsView();
+for (const model of Object.keys(selectors)) Object.freeze(selectors[model]);
+export const SELECTORS = Object.freeze(selectors);

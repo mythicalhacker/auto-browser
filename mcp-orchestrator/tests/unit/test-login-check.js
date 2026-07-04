@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Login Check Unit Tests
  * Tests login detection with mock page objects — no Chrome needed.

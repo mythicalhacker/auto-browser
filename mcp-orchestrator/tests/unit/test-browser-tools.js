@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Browser Tools Unit Tests
  * Validates tool definitions, handler defaults, and no duplicate tool names.

@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Health Check Unit Tests
  * Tests getHealthReport() and formatHealthReport() with mock objects — no Chrome needed.

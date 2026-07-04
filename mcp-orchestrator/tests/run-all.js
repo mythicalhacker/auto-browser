@@ -15,6 +15,13 @@ import { dirname, join } from "path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CDP_URL = "http://localhost:9222";
 
+// Hermetic suite: tests must see registry DEFAULTS, never a developer's
+// ~/.auto-browser/registry.json (spawned test processes inherit this env).
+// The pinned path intentionally does not exist.
+if (!process.env.REGISTRY_FILE) {
+  process.env.REGISTRY_FILE = join(__dirname, ".no-registry-override.json");
+}
+
 const TESTS = [
   {
     name: "Login Check",
@@ -89,6 +96,13 @@ const TESTS = [
   {
     name: "Config Defaults",
     file: "unit/test-config-defaults.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
+    name: "Registry",
+    file: "unit/test-registry.js",
     critical: false,
     category: "unit",
     requiresChrome: false

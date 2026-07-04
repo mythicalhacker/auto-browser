@@ -9,19 +9,28 @@ import { mkdirSync, writeFileSync } from 'fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 mkdirSync(join(__dirname, '.state'), { recursive: true });
 if (!process.env.STATE_FILE) process.env.STATE_FILE = join(__dirname, '.state', 'probe.json');
+// Same invariant as run-e2e.js: the harness measures registry DEFAULTS, never
+// a developer's ~/.auto-browser/registry.json (path intentionally absent).
+if (!process.env.REGISTRY_FILE) {
+  process.env.REGISTRY_FILE = join(__dirname, '.state', 'no-registry-override.json');
+}
 
 const { chromium } = await import('playwright');
-const { PATTERNS } = await import('../../config.js');
+const { getRegistry } = await import('../../models/registry.js');
 const { checkLogin } = await import('../../utils/login-check.js');
 
-const ENTRY = { claude: 'https://claude.ai/new', chatgpt: 'https://chatgpt.com/' };
+// Attempt-B re-entry target per provider (registry newChatUrl; null = no
+// re-entry attempt, e.g. gemini).
+const ENTRY = Object.fromEntries(
+  Object.entries(getRegistry()).map(([m, d]) => [m, d.newChatUrl]).filter(([, u]) => u)
+);
 
 const browser = await chromium.connectOverCDP('http://localhost:9222');
 const ctx = browser.contexts()[0];
 const final = {};
 
-for (const model of ['claude', 'chatgpt', 'gemini']) {
-  const page = ctx.pages().find((p) => p.url().includes(PATTERNS[model]));
+for (const [model, desc] of Object.entries(getRegistry())) {
+  const page = ctx.pages().find((p) => p.url().includes(desc.urlPattern));
   if (!page) {
     final[model] = { loggedIn: false, reason: 'no tab' };
     continue;

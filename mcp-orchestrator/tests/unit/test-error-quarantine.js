@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Error Quarantine Contract Tests — Stage 3 (PR-2) SCAFFOLD
  *

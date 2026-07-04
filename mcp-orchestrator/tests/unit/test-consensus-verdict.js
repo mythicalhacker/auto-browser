@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Consensus Verdict Unit Tests
  * Validates verdict parsing, consensus detection rules, verdict stripping in

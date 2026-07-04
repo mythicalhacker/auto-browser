@@ -1,12 +1,40 @@
 // services/browser-service.js — Singleton managing browser connection and page discovery
 import { chromium } from 'playwright';
-import { CONFIG, ENTRY_URLS } from '../config.js';
+import { CONFIG } from '../config.js';
+import { getRegistry, providerNames } from '../models/registry.js';
 import { ensureChromeRunning } from '../utils/chrome-launcher.js';
 import { withRetry } from '../utils/barrier.js';
 
+function emptyPageSlots() {
+  return Object.fromEntries(providerNames().map((m) => [m, null]));
+}
+
+/**
+ * Pure page classification: pick one page per provider from `pages`
+ * (objects with .url()). Per descriptor: a urlPattern+preferPathPattern
+ * match wins; otherwise the first urlPattern match not hitting an
+ * excludePathPattern. Exported for unit tests; #discoverPages feeds it
+ * live CDP pages.
+ */
+export function pickProviderPages(pages) {
+  const picked = {};
+  for (const [model, d] of Object.entries(getRegistry())) {
+    const preferred = (d.preferPathPatterns ?? [])
+      .map((frag) => pages.find((p) => p.url().includes(d.urlPattern + frag)))
+      .find(Boolean);
+    const fallback = pages.find((p) => {
+      const url = p.url();
+      return url.includes(d.urlPattern)
+        && !(d.excludePathPatterns ?? []).some((frag) => url.includes(frag));
+    });
+    picked[model] = preferred || fallback || null;
+  }
+  return picked;
+}
+
 class BrowserService {
   #browser = null;
-  #pages = { claude: null, chatgpt: null, gemini: null };
+  #pages = emptyPageSlots();
   #connectPromise = null;
 
   async connect() {
@@ -23,7 +51,7 @@ class BrowserService {
     // Re-discover pages if browser disconnected since last call
     if (this.#browser && !this.#browser.isConnected()) {
       this.#browser = null;
-      this.#pages = { claude: null, chatgpt: null, gemini: null };
+      this.#pages = emptyPageSlots();
     }
 
     if (this.#browser) return this.#browser;
@@ -54,11 +82,11 @@ class BrowserService {
     // choice, and the insufficient_models guard depends on reading it as-is.
     if (launchedHere) {
       const ctx = this.#browser.contexts()[0];
-      for (const [model, url] of Object.entries(ENTRY_URLS)) {
+      for (const [model, desc] of Object.entries(getRegistry())) {
         if (ctx && !this.#pages[model]) {
           try {
             const page = await ctx.newPage();
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: CONFIG.timeouts.navigation });
+            await page.goto(desc.entryUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.timeouts.navigation });
             await page.waitForTimeout(3000); // let the SPA settle
           } catch (e) {
             console.error(`[connect] could not open ${model} tab: ${e.message}`);
@@ -74,16 +102,7 @@ class BrowserService {
   #discoverPages() {
     const contexts = this.#browser.contexts();
     if (contexts.length === 0) return;
-    const allPages = contexts[0].pages();
-
-    // For Claude, prefer chat pages over other claude.ai pages
-    const claudeChatPage = allPages.find(p => p.url().includes('claude.ai/chat/'));
-    const claudeAnyPage = allPages.find(p => p.url().includes('claude.ai') && !p.url().includes('/chrome/'));
-    this.#pages.claude = claudeChatPage || claudeAnyPage || null;
-
-    // For ChatGPT and Gemini, find any matching page
-    this.#pages.chatgpt = allPages.find(p => p.url().includes('chatgpt.com')) || null;
-    this.#pages.gemini = allPages.find(p => p.url().includes('gemini.google.com')) || null;
+    this.#pages = pickProviderPages(contexts[0].pages());
   }
 
   getPage(model) {
@@ -124,7 +143,7 @@ class BrowserService {
         console.error('[cleanup] Browser close error (non-fatal):', e.message);
       }
       this.#browser = null;
-      this.#pages = { claude: null, chatgpt: null, gemini: null };
+      this.#pages = emptyPageSlots();
     }
   }
 }

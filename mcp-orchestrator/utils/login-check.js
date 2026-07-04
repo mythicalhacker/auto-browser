@@ -1,12 +1,6 @@
 // utils/login-check.js — Login detection for AI platform tabs
-import { SELECTORS, PATTERNS } from '../config.js';
+import { getProvider, loginUrlPatternsFor } from '../models/registry.js';
 import { findFirst } from './selectors.js';
-
-// URL patterns that indicate a login/auth page (not logged in)
-const LOGIN_URL_PATTERNS = [
-  '/login', '/signin', '/sign-in', '/auth', '/oauth',
-  'accounts.google.com',
-];
 
 /**
  * Check whether a single model tab appears to be logged in.
@@ -14,19 +8,19 @@ const LOGIN_URL_PATTERNS = [
  * URL-based login page detection is used as a secondary signal.
  *
  * @param {import('playwright').Page} page
- * @param {'claude'|'chatgpt'|'gemini'} model
+ * @param {string} model — a registry provider name
  * @returns {Promise<{loggedIn: boolean, reason: string}>}
  */
 export async function checkLogin(page, model) {
-  const selectors = SELECTORS[model];
-  if (!selectors) {
+  const provider = getProvider(model);
+  if (!provider) {
     return { loggedIn: false, reason: `Unknown model: ${model}` };
   }
 
   // Secondary signal: URL looks like a login page
   try {
     const url = page.url().toLowerCase();
-    for (const pattern of LOGIN_URL_PATTERNS) {
+    for (const pattern of loginUrlPatternsFor(model)) {
       if (url.includes(pattern)) {
         return { loggedIn: false, reason: `URL contains login pattern: ${pattern}` };
       }
@@ -37,7 +31,7 @@ export async function checkLogin(page, model) {
 
   // Primary signal: can we find the input element?
   try {
-    const result = await findFirst(page, selectors.input);
+    const result = await findFirst(page, provider.selectors.input);
     if (result) {
       return { loggedIn: true, reason: `Input found: ${result.selector}` };
     }
@@ -50,7 +44,7 @@ export async function checkLogin(page, model) {
 /**
  * Check login status for all provided model pages.
  *
- * @param {Object<string, import('playwright').Page>} pages — e.g. { claude: page, chatgpt: page, gemini: page }
+ * @param {Object<string, import('playwright').Page>} pages — keyed by registry provider name
  * @returns {Promise<{allLoggedIn: boolean, results: Object<string, {loggedIn: boolean, reason: string}>}>}
  */
 export async function checkAllLogins(pages) {

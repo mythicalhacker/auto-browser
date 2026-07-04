@@ -20,6 +20,12 @@ if (!process.env.STATE_FILE) {
 if (!process.env.AUTO_LAUNCH_CHROME) {
   process.env.AUTO_LAUNCH_CHROME = '0';
 }
+// Gates assert against registry DEFAULTS: a developer's ~/.auto-browser/
+// registry.json must never change what the harness measures. The pinned path
+// intentionally does not exist (spawned servers inherit this env).
+if (!process.env.REGISTRY_FILE) {
+  process.env.REGISTRY_FILE = join(STATE_DIR, 'no-registry-override.json');
+}
 
 const { GATES, startCaffeinate, ledgerSnapshot } = await import('./gates.js');
 

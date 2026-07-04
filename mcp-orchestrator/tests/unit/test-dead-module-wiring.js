@@ -1,3 +1,4 @@
+import './_hermetic-env.js'; // pins REGISTRY_FILE before product imports
 /**
  * Dead-Module Wiring Tests — Stage 6 (PR-5).
  * Context-compression in cross-pollination, per-round login gating
