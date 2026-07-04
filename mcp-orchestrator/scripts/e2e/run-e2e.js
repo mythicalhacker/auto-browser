@@ -26,6 +26,14 @@ if (!process.env.AUTO_LAUNCH_CHROME) {
 if (!process.env.REGISTRY_FILE) {
   process.env.REGISTRY_FILE = join(STATE_DIR, 'no-registry-override.json');
 }
+// Research-train state (queue, quota ledger, artifacts) lives in the harness
+// .state during gates — never the real ~/.auto-browser/research.
+if (!process.env.RESEARCH_HOME) {
+  process.env.RESEARCH_HOME = join(STATE_DIR, 'research');
+}
+if (!process.env.QUOTA_FILE) {
+  process.env.QUOTA_FILE = join(STATE_DIR, 'quotas.json');
+}
 
 const { GATES, startCaffeinate, ledgerSnapshot } = await import('./gates.js');
 

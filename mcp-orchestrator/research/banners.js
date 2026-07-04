@@ -1,18 +1,28 @@
 // research/banners.js — provider interrupt detection for deep-research runs.
 //
-// A DR run has THREE terminal states, not two: a report, a QUOTA/limit
-// banner (provider throttled — cooldown + awaiting_quota), or a PAUSE/flag
-// banner (safety layer stopped the chat — observed live 2026-07-04: "Chat
-// paused … Fable's safeguards flagged this message"). Both banner states
-// preserve the chat URL so a paid run is never lost.
+// A DR run has THREE terminal states, not two: a report, a HARD quota/limit
+// block (provider refuses to continue — cooldown + awaiting_quota), or a
+// PAUSE/flag (safety layer stopped the chat — observed live 2026-07-04:
+// "Chat paused … Fable's safeguards flagged this message"). Both preserve the
+// chat URL so a paid run is never lost.
 //
-// Reset-time parsing is best-effort from banner text (live specimen:
-// "Now using credits • Your plan limit resets Saturday at 8:00 PM.").
+// Conservative by design (learned live 2026-07-04): a SOFT usage warning
+// like "You've used 91% of your Fable 5 limit · Resets Thursday" is NOT a
+// block — the run proceeds — and page scripts / a report that merely
+// discusses "rate limiting" must never be misread as an interrupt. So:
+//   - only HARD block/pause phrases fire (soft "used N%"/"approaching" don't);
+//   - matching runs on LIVE innerText (excludes <script>/<style>/hidden),
+//     never a detached clone (whose innerText leaks raw script text);
+//   - a phrase that also appears inside the report/prompt region is treated
+//     as content, not chrome.
 import { findAll } from '../utils/selectors.js';
 import { getProvider } from '../models/registry.js';
 
-const QUOTA_TEXT_RE = /\b(limit|quota|usage|credits?|rate.?limited?|upgrade to continue|too many requests)\b/i;
-const PAUSE_TEXT_RE = /\b(chat paused|safeguards? flagged|flagged this message|response was blocked|cannot continue this chat)\b/i;
+// HARD quota/limit block — refuses further generation. Deliberately excludes
+// soft warnings ("used 91%", "approaching your limit", bare "usage").
+const HARD_QUOTA_RE = /\b(reached your (?:\w+\s+){0,3}limit|you'?re out of (?:messages|credits)|out of credits|rate.?limited|too many requests|no (?:messages?|credits?) (?:remaining|left)|message limit reached|usage limit reached|limit reached\b|upgrade to (?:keep|continue))\b/i;
+
+const PAUSE_TEXT_RE = /\b(chat paused|safeguards? flagged|flagged this message|response (?:was|has been) blocked|can(?:'|no)?t continue this chat|cannot continue this chat)\b/i;
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
@@ -80,6 +90,12 @@ async function visibleTexts(page, selectors) {
   return texts;
 }
 
+function classify(text) {
+  if (PAUSE_TEXT_RE.test(text)) return 'paused';
+  if (HARD_QUOTA_RE.test(text)) return 'quota';
+  return null;
+}
+
 /**
  * Inspect a live page for a provider interrupt.
  * @returns {Promise<{type: 'quota'|'paused'|null, text: string|null, resetAt: number|null}>}
@@ -87,56 +103,52 @@ async function visibleTexts(page, selectors) {
 export async function detectInterrupt(page, provider, now = Date.now()) {
   const d = getProvider(provider);
 
-  // 1. Registry quota-banner selectors, text-filtered (some slots are
-  // generic live regions that must actually SAY something quota-like).
+  // 1. Registry quota-banner elements (specific), HARD-phrase filtered.
   for (const text of await visibleTexts(page, d?.selectors?.quotaBanner)) {
-    if (QUOTA_TEXT_RE.test(text)) {
-      return { type: 'quota', text: text.slice(0, 300), resetAt: parseResetTime(text, now) };
-    }
-    if (PAUSE_TEXT_RE.test(text)) {
-      return { type: 'paused', text: text.slice(0, 300), resetAt: null };
-    }
+    const type = classify(text);
+    if (type === 'quota') return { type, text: text.slice(0, 300), resetAt: parseResetTime(text, now) };
+    if (type === 'paused') return { type, text: text.slice(0, 300), resetAt: null };
   }
 
-  // 2. Page-chrome scan for pause/flag wording (the pause card is not a
-  // banner element; it replaces the response area). Scan the page MINUS the
-  // conversation content — otherwise a report or prompt that merely discusses
-  // "rate limited" / "flagged content" is misread as a real interrupt and a
-  // paid run is discarded. Strip the output + user-message + composer regions
-  // before reading text; banners/pause cards live outside those.
+  // 2. Page-CHROME scan for a pause/limit card that is not a banner element
+  // (the pause card replaces the response area). Read LIVE innerText —
+  // excludes <script>/<style>/hidden — and subtract the conversation region,
+  // so report/prompt prose that merely discusses limits is never mis-flagged.
   const stripSelectors = [
     ...(d?.selectors?.output ?? []),
     ...(d?.selectors?.userMessage ?? []),
     ...(d?.selectors?.input ?? []),
   ];
-  let body = null;
+  let scan = null;
   try {
     if (typeof page.evaluate === 'function') {
-      body = await page.evaluate((sels) => {
-        const clone = document.body?.cloneNode(true);
-        if (!clone) return '';
+      scan = await page.evaluate((sels) => {
+        const bodyText = document.body?.innerText ?? '';
+        let content = '';
         for (const sel of sels) {
+          let els = [];
           try {
-            clone.querySelectorAll(sel).forEach((el) => el.remove());
+            els = document.querySelectorAll(sel);
           } catch {
-            // invalid selector — skip
+            els = [];
           }
+          for (const el of els) content += `\n${el.innerText ?? ''}`;
         }
-        return clone.innerText ?? '';
+        return { bodyText, content };
       }, stripSelectors);
     }
   } catch {
     // page busy/navigating — no evidence
   }
-  if (body) {
-    const pause = body.match(PAUSE_TEXT_RE);
-    if (pause) {
-      const at = body.toLowerCase().indexOf(pause[0].toLowerCase());
-      return { type: 'paused', text: body.slice(Math.max(0, at - 40), at + 260).trim(), resetAt: null };
-    }
-    const quota = body.match(/[^\n]*\b(?:plan limit|usage limit|out of credits|rate limited)\b[^\n]*/i);
-    if (quota) {
-      return { type: 'quota', text: quota[0].slice(0, 300).trim(), resetAt: parseResetTime(quota[0], now) };
+  if (scan && scan.bodyText) {
+    // Examine each line of chrome (body minus the conversation content).
+    for (const line of scan.bodyText.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      if (scan.content.includes(t)) continue; // it's report/prompt content
+      const type = classify(t);
+      if (type === 'paused') return { type, text: t.slice(0, 300), resetAt: null };
+      if (type === 'quota') return { type, text: t.slice(0, 300), resetAt: parseResetTime(t, now) };
     }
   }
   return { type: null, text: null, resetAt: null };

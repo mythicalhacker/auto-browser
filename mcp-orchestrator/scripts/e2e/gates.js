@@ -687,6 +687,74 @@ export async function gateDrivers(log) {
   return details;
 }
 
+/** Live: PR-10 deep-research pipeline (PAUSE-DR approved, 2 DR spends). One
+ * standard task routes to claude+chatgpt (NO gemini); the real runner drives
+ * ensureChat+research+send, harvests each report via completion detection,
+ * and writes artifacts. Asserts both complete with on-disk artifacts and the
+ * quota ledger counted exactly one DR per provider. Long-running (DR is
+ * 5–45 min/provider, parallel). */
+export async function gateResearchDR(log) {
+  const details = [];
+  const providers = ['claude', 'chatgpt']; // gemini deliberately excluded
+  const { submitBatch, statusTable, getTask, listTasks } = await import('../../research/research-queue.js');
+  const { drainQueue } = await import('../../research/runner.js');
+  const { quotaSnapshot } = await import('../../research/quota-ledger.js');
+  const { acquireDrainLock, releaseDrainLock } = await import('../../research/lockfile.js');
+  const { browserService } = await import('../../services/browser-service.js');
+  const { existsSync, readFileSync } = await import('fs');
+
+  const lock = acquireDrainLock();
+  if (!lock.ok) return [`BLOCKED: a drain lock is held (pid ${lock.holder.pid}) — no gate DR while a runner is active`];
+
+  await pauseBetweenConsensusRuns(log);
+  charge(providers, 1); // each DR run sends exactly one prompt message
+
+  const usedBefore = quotaSnapshot(providers);
+  const { batch, taskIds } = submitBatch([{
+    prompt: 'Research the release history of Node.js LTS versions. Produce a short report (a few paragraphs): list the major LTS lines with their release and end-of-life years, and note the current active LTS.',
+  }]);
+  const taskId = taskIds[0];
+  assertInto(details, getTask(taskId).providers.join(',') === 'claude,chatgpt',
+    `standard task routed to claude+chatgpt only (no gemini DR)`);
+  log(`submitted DR batch ${batch} task ${taskId}`);
+
+  try {
+    // Generous ceiling: a short LTS report should finish well inside 40 min.
+    const summary = await drainQueue(browserService, {
+      providers,
+      batch,
+      log,
+      waitOpts: { timeoutMs: 40 * 60 * 1000, stableMs: 60 * 1000, pollMs: 8000 },
+    });
+    log(`drain summary: ${JSON.stringify(summary)}`);
+
+    const task = getTask(taskId);
+    for (const provider of providers) {
+      const pp = task.perProvider[provider];
+      assertInto(details, pp.status === 'complete',
+        `${provider}: DR status complete (got ${pp.status}${pp.error ? ` — ${pp.error}` : ''}; chat ${pp.chatUrl})`);
+      const hasArtifact = pp.artifactPath && existsSync(pp.artifactPath);
+      assertInto(details, hasArtifact, `${provider}: artifact written (${pp.artifactPath})`);
+      if (hasArtifact) {
+        const body = readFileSync(pp.artifactPath, 'utf8');
+        assertInto(details, body.length > 400 && /node/i.test(body),
+          `${provider}: artifact is a real report (${body.length} chars, mentions Node)`);
+        assertInto(details, existsSync(pp.artifactPath.replace(/\.md$/, '.meta.json')),
+          `${provider}: meta.json written`);
+      }
+    }
+    const usedAfter = quotaSnapshot(providers);
+    for (const provider of providers) {
+      assertInto(details, usedAfter[provider].used === usedBefore[provider].used + 1,
+        `${provider}: exactly one DR spend counted (${usedBefore[provider].used}→${usedAfter[provider].used})`);
+    }
+  } finally {
+    releaseDrainLock();
+    await browserService.disconnect();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -701,6 +769,7 @@ export const GATES = {
   coldstart: gateColdStart,
   compression: gateCompression,
   drivers: gateDrivers,
+  researchdr: gateResearchDR,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

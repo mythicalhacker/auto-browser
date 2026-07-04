@@ -254,6 +254,7 @@ export async function runProviderTask(browserService, provider, task, { log = ()
   }
   for (const w of setup.warnings) log(`[${provider}] ${task.id}: ${w.code} — ${w.detail}`);
 
+  const urlBeforeSend = page.url();
   queue.markRunning(task.id, provider);
   recordDRSpend(provider); // counted at send time — a started run is a paid run
   queue.markSpent(task.id, provider); // sealed BEFORE the send click: a crash mid-send resumes/fails, never re-runs
@@ -273,6 +274,12 @@ export async function runProviderTask(browserService, provider, task, { log = ()
     refundDRSpend(provider);
     queue.markFailed(task.id, provider, { error: `send (unsent): ${e.message}` });
     return 'failed';
+  }
+  // Wait for the SPA to create + navigate to the conversation before pinning
+  // the chat URL — pinning the pre-send entry URL (observed live: sealed
+  // chatgpt.com/ instead of /c/<id>) makes the run unrecoverable on resume.
+  for (let i = 0; i < 12 && page.url() === urlBeforeSend; i++) {
+    await page.waitForTimeout(1000);
   }
   queue.recordChatUrl(task.id, provider, page.url());
   log(`[${provider}] ${task.id}: research running (${page.url()})`);

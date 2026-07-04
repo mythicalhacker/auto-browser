@@ -72,13 +72,13 @@ assert(snap.gemini.used === 5 && snap.gemini.eligible === false && snap.claude.e
 // --- reset-time parsing --------------------------------------------------------
 console.log('\nreset-time parsing:');
 const FRI = new Date(2026, 6, 3, 19, 0, 0).getTime(); // Friday 19:00 local
-const liveBanner = 'Now using credits • Your plan limit resets Saturday at 8:00 PM.';
-const satReset = banners.parseResetTime(liveBanner, FRI);
+const hardBanner = "You've reached your Fable 5 limit · Resets Saturday at 8:00 PM.";
+const satReset = banners.parseResetTime(hardBanner, FRI);
 {
   const d = new Date(satReset);
   assert(d.getDay() === 6 && d.getHours() === 20 && d.getMinutes() === 0
     && satReset > FRI && satReset - FRI < 2 * 24 * 3600 * 1000,
-    'live Claude banner → next Saturday 20:00');
+    'hard-limit banner → next Saturday 20:00');
 }
 assert(banners.parseResetTime('try again in 2 hours', FRI) === FRI + 2 * 3600 * 1000, '"in 2 hours" relative');
 assert(banners.parseResetTime('available again in 45 minutes', FRI) === FRI + 45 * 60000, '"in 45 minutes" relative');
@@ -90,28 +90,49 @@ assert(banners.parseResetTime('available again in 45 minutes', FRI) === FRI + 45
   const d2 = new Date(t2);
   assert(t2 > FRI && d2.getHours() === 3, 'bare clock time → next occurrence');
 }
-assert(banners.parseResetTime('You have reached your limit.', FRI) === null, 'unparseable → null (caller defaults)');
+assert(banners.parseResetTime('Some message with no time', FRI) === null, 'unparseable → null (caller defaults)');
 
-// --- banner detection ----------------------------------------------------------
-console.log('\nbanner detection:');
-function bannerPage({ bannerText = null, bodyText = '' } = {}) {
+// --- banner detection (conservative: hard-block only) --------------------------
+console.log('\nbanner detection (learned live 2026-07-04: soft warnings must NOT park):');
+function bannerPage({ bannerText = null, bodyText = '', contentText = '' } = {}) {
   const el = (t) => ({ innerText: async () => t, evaluate: async () => 'x', isVisible: async () => true, click: async () => {} });
   return {
     url: () => 'https://claude.ai/chat/x',
     $: async (s) => (bannerText && s === 'div[role="status"] span.text-body' ? el(bannerText) : null),
     $$: async (s) => (bannerText && s === 'div[role="status"] span.text-body' ? [el(bannerText)] : []),
-    evaluate: async () => bodyText,
+    // Model live innerText: excludes <script>/hidden; report region subtracted.
+    evaluate: async () => ({ bodyText, content: contentText }),
     waitForTimeout: async () => {},
   };
 }
 {
-  const hit = await banners.detectInterrupt(bannerPage({ bannerText: liveBanner }), 'claude', FRI);
-  assert(hit.type === 'quota' && hit.resetAt === satReset, 'live credits banner → quota with parsed reset');
+  // Soft warnings — the exact live specimens that FALSELY parked GATE 10.
+  const soft1 = await banners.detectInterrupt(bannerPage({ bannerText: "You've used 91% of your Fable 5 limit · Resets Thursday at 11:30 PM" }), 'claude', FRI);
+  assert(soft1.type === null, '"used 91% … Resets Thursday" is a soft warning → NOT parked');
+  const soft2 = await banners.detectInterrupt(bannerPage({ bannerText: 'Now using credits • Your plan limit resets Saturday at 8:00 PM.' }), 'claude', FRI);
+  assert(soft2.type === null, '"Now using credits … resets" is a soft notice → NOT parked');
+
+  // Hard block — a real limit-reached banner still parks, with reset parsed.
+  const hard = await banners.detectInterrupt(bannerPage({ bannerText: hardBanner }), 'claude', FRI);
+  assert(hard.type === 'quota' && hard.resetAt === satReset, 'hard "reached your limit" banner → quota with reset');
+  const oom = await banners.detectInterrupt(bannerPage({ bannerText: "You're out of messages. Try again later." }), 'claude', FRI);
+  assert(oom.type === 'quota', '"out of messages" → quota');
+
+  // Safety pause card.
   const paused = await banners.detectInterrupt(bannerPage({
     bodyText: 'Chat paused\nEdit and retry with Fable 5\n\nFable’s safeguards flagged this message.',
   }), 'claude', FRI);
-  assert(paused.type === 'paused' && /safeguards flagged/i.test(paused.text),
+  assert(paused.type === 'paused' && /chat paused|safeguards flagged/i.test(paused.text),
     'live safeguard pause card → paused with evidence');
+
+  // Report/prompt CONTENT that discusses limits must NOT be mis-flagged.
+  const reportish = await banners.detectInterrupt(bannerPage({
+    bodyText: 'Node.js LTS report\nThe API returned "rate limited" during testing and reached your limit.',
+    contentText: 'Node.js LTS report\nThe API returned "rate limited" during testing and reached your limit.',
+  }), 'claude', FRI);
+  assert(reportish.type === null, 'limit wording INSIDE the report (content) is subtracted → not an interrupt');
+
+  // Page-script text is excluded by live innerText (never appears in bodyText).
   const clean = await banners.detectInterrupt(bannerPage({ bodyText: 'What is 2+2?\n4' }), 'claude', FRI);
   assert(clean.type === null, 'clean page → no interrupt');
 }
@@ -294,7 +315,7 @@ function fakeResearchSite({ mode = 'complete', loggedIn = true, sent = false, ch
         case '.font-claude-response .standard-markdown': return state.sent ? [el(answerText)] : [];
         case '.quota-banner':
           return (mode === 'quota-after-send' && state.sent && state.ticks >= 2)
-            ? [el('Your plan limit resets Saturday at 8:00 PM.')]
+            ? [el("You've reached your Fable 5 limit · Resets Saturday at 8:00 PM.")]
             : [];
         default: return [];
       }
@@ -334,7 +355,7 @@ const FAST = { pollMs: 2, stableMs: 20, timeoutMs: 3000 };
   assert(status === 'awaiting_quota' && pp.status === 'awaiting_quota', 'mid-run quota banner → awaiting_quota (never failed)');
   assert(pp.chatUrl === 'https://claude.ai/chat/dr-run-1', 'paid run stays recoverable (chatUrl kept)');
   const gate = ledger.canSpendDR('claude');
-  assert(gate.ok === false && String(gate.reason).includes('plan limit'), 'provider put on cooldown from the banner');
+  assert(gate.ok === false && /reached your.*limit/i.test(String(gate.reason)), 'provider put on cooldown from the hard-limit banner');
   ledger.setCooldown('claude', null);
 }
 {
