@@ -4,17 +4,23 @@ Multi-model consensus orchestration for Claude, ChatGPT, and Gemini.
 
 ## Setup
 
-### 1. Install dependencies
-```powershell
-cd "<path-to>\Auto_Browser\mcp-orchestrator"
-npm install
+### 1. Install dependencies (Node.js ≥ 20)
+```bash
+cd <path-to>/Auto_Browser/mcp-orchestrator
+npm ci
 ```
 
 ### 2. Start Chrome with debugging enabled
-```powershell
-# Close all Chrome windows first, then:
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="<path-to>\chrome-debug-profile"
+
+Use a dedicated profile directory, kept outside the repo — it holds real browser credentials.
+
+macOS / Linux:
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --user-data-dir="$HOME/.auto-browser/chrome-profile"
 ```
+
+Windows: run `start-chrome-debug.bat` (closes Chrome first, then relaunches `chrome.exe` with the same two flags).
 
 ### 3. Open tabs in Chrome
 Open these 3 tabs and log in:
@@ -23,20 +29,37 @@ Open these 3 tabs and log in:
 - https://gemini.google.com
 
 ### 4. Add to Claude Desktop config
-Edit: `%APPDATA%\Claude\claude_desktop_config.json`
+Edit `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`):
 
 ```json
 {
   "mcpServers": {
     "orchestrator": {
       "command": "node",
-      "args": ["<path-to>\\Auto_Browser\\mcp-orchestrator\\server.js"]
+      "args": ["<path-to>/Auto_Browser/mcp-orchestrator/server.js"]
     }
   }
 }
 ```
 
 ### 5. Restart Claude Desktop
+
+---
+
+## Configuration (environment variables)
+
+All optional; defaults in `config.js`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CDP_URL` | `http://localhost:9222` | Chrome DevTools endpoint to attach to |
+| `STATE_FILE` | `mcp-orchestrator/consensus_state.json` | Where consensus state is persisted |
+| `CHROME_PATH` | Windows Chrome path | Chrome binary (used by the launcher utility; set on macOS/Linux) |
+| `CHROME_USER_DATA` | `mcp-orchestrator/.chrome-debug` | Debug profile dir (prefer a path outside the repo) |
+| `TIMEOUT_RESPONSE` | `120000` | Max ms to wait for a model's response |
+| `TIMEOUT_BARRIER` | `120000` | Max ms for a whole round's completion |
+| `TIMEOUT_NAVIGATION` | `30000` | Page navigation timeout (ms) |
+| `TIMEOUT_ACTION` | `10000` | Click/selector action timeout (ms) |
 
 ---
 
@@ -49,7 +72,7 @@ Edit: `%APPDATA%\Claude\claude_desktop_config.json`
 | `connect_browser` | Connect to Chrome on CDP port 9222 |
 | `health_check` | Verify Chrome connection, tabs, and login state |
 | `send_single_round` | Send prompt to all 3 models and wait for responses (single round) |
-| `start_consensus` | Start autonomous consensus workflow (iterates until agreement) |
+| `start_consensus` | Start autonomous consensus workflow (iterates until agreement; `max_rounds` 2–10, default 5) |
 | `get_consensus_status` | Check current consensus workflow status and progress |
 | `get_consensus_results` | Get full results from completed or in-progress workflow |
 | `get_last_round` | Get just the last round's outputs |
@@ -57,6 +80,22 @@ Edit: `%APPDATA%\Claude\claude_desktop_config.json`
 **Browser automation** — 18 general-purpose `browser_*` tools for driving the connected Chrome directly: navigation (`browser_navigate`, `browser_back`, `browser_forward`, `browser_new_tab`, `browser_close_tab`, `browser_tabs`), interaction (`browser_click`, `browser_type`, `browser_hover`, `browser_select`, `browser_press_key`, `browser_wait`, `browser_file_upload`), and inspection (`browser_get_text`, `browser_get_html`, `browser_screenshot`, `browser_snapshot`, `browser_evaluate`).
 
 **Task queue & dispatch** — queue prompts as background tasks: `task_submit`, `task_status`, `task_list`, `task_cancel`, plus `task_run` / `task_run_all` for direct dispatch.
+
+---
+
+## The verdict protocol
+
+From round 2 on, every model is asked to end its response with a standalone line:
+
+```
+VERDICT: AGREE     (or)     VERDICT: DISAGREE
+```
+
+- A verdict only counts on its own line — instruction echoes, prose mentions, and error strings never match.
+- `AGREE` must be unhedged (a qualified agree is an abstention); `DISAGREE` tolerates a trailing clause so a hedged dissent still blocks.
+- Consensus requires **≥ 2 AGREE votes and zero DISAGREE** among models that responded.
+- Peer verdict lines are stripped before responses are cross-pollinated, so a quoted answer can't cast a spurious vote.
+- Runs abort immediately with `insufficient_models` when fewer than 2 model tabs are open.
 
 ---
 
@@ -90,13 +129,21 @@ The consensus workflow cross-pollinates responses: each model receives the OTHER
 
 **Selectors not working**
 - Sites update their UI often; selectors are defined in `config.js`
-- Run `node tests/unit/test-selectors.js` to check them
+- Run `node tests/integration/test-selectors.js` (needs the debug Chrome running) to check them
 
 ---
 
 ## Tests
 
 ```bash
+npm test                        # Chrome-free unit suite (what CI runs)
+npm run test:integration        # Chrome-bound integration tests
 node tests/run-all.js --quick   # unit + integration (skips the e2e consensus test)
-node tests/run-all.js           # full suite — requires Chrome connected with fresh chat tabs
+node tests/run-all.js           # full suite — requires Chrome with fresh chat tabs
+node scripts/e2e/run-e2e.js --gates=handshake,validation   # MCP-protocol e2e (Chrome-free)
+```
+
+Live e2e gates (race/agreeable/timeout — require ≥ 2 logged-in models):
+```bash
+node scripts/e2e/run-e2e.js --gates=logins,race,agreeable,verdictstrip,timeout --live
 ```
