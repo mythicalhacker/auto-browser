@@ -88,9 +88,9 @@ const TESTS = [
   },
   {
     name: "Selectors",
-    file: "unit/test-selectors.js",
+    file: "integration/test-selectors.js",
     critical: true,
-    category: "unit",
+    category: "integration",
     requiresChrome: true
   },
   {

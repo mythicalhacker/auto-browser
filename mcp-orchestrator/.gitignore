@@ -2,6 +2,7 @@ node_modules/
 .pipeline/
 auto-pipeline/.pipeline/
 consensus_state.json
+state/
 nul
 *.log
 .chrome-debug/
