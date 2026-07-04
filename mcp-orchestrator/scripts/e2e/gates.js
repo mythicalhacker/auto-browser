@@ -755,6 +755,81 @@ export async function gateResearchDR(log) {
   return details;
 }
 
+/** Live: PR-11 synthesis pipeline (normal-message spend only, ZERO DR).
+ * Seeds two short reports for a task, then runs the real synthesis machinery
+ * (compilation round + 1 verdict round over the drafts) and asserts a
+ * coherent FINAL.md. Exercises the large-payload compilation send + verdict
+ * rounds without spending deep-research quota. */
+export async function gateSynthesize(log) {
+  const details = [];
+  const { submitBatch, getTask, markRunning, markSpent, recordChatUrl, markComplete, artifactPathFor } =
+    await import('../../research/research-queue.js');
+  const { synthesizeTask, finalPath } = await import('../../research/synthesis.js');
+  const { browserService } = await import('../../services/browser-service.js');
+  const { existsSync, readFileSync, mkdirSync, writeFileSync } = await import('fs');
+  const { dirname } = await import('path');
+
+  await browserService.connect();
+  const active = browserService.getActiveModels();
+  if (active.length < 2) return ['BLOCKED: synthesis needs ≥2 logged-in model tabs'];
+
+  await pauseBetweenConsensusRuns(log);
+  // Synthesis = 1 compilation round + up to 1 verdict round = ≤2 messages/site.
+  charge(active, 2);
+
+  // Seed two short, deliberately-divergent reports on the same topic.
+  const { taskIds: [taskId] } = submitBatch([{ prompt: 'Summarize the Node.js LTS release cadence and how LTS lines are numbered.' }]);
+  const seeds = {
+    claude: '# Node.js LTS — report A\n\nNode.js cuts a new major release every 6 months (April and October). '
+      + 'Even-numbered majors (18, 20, 22) enter Long-Term Support that October; odd majors never become LTS. '
+      + 'Each LTS line gets ~30 months of support: roughly 12 months "Active LTS" then ~18 months "Maintenance". '
+      + 'The scheme has been stable since Node 4 (2015).',
+    chatgpt: '# Node.js LTS — report B\n\nNode releases follow a time-based model: a new major line twice a year. '
+      + 'Only even majors are promoted to LTS (odd lines are "Current" only). An LTS line runs about 3 years total, '
+      + 'split into Active and Maintenance phases. Numbering is sequential by major version; the codenames (e.g. '
+      + '"Iron", "Hydrogen") track the LTS lines. The current active LTS is the most recent even major.',
+  };
+  const task = getTask(taskId);
+  const seededProviders = active.filter((m) => seeds[m]).slice(0, 2);
+  if (seededProviders.length < 2) {
+    // fall back to seeding the first two active models with the two seed texts
+    const texts = Object.values(seeds);
+    seededProviders.length = 0;
+    active.slice(0, 2).forEach((m, i) => { seeds[m] = texts[i]; seededProviders.push(m); });
+  }
+  for (const provider of seededProviders) {
+    const path = artifactPathFor(task, provider);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, seeds[provider]);
+    markRunning(taskId, provider);
+    markSpent(taskId, provider);
+    recordChatUrl(taskId, provider, `https://seed/${provider}`);
+    markComplete(taskId, provider, { artifactPath: path });
+  }
+  assertInto(details, getTask(taskId).perProvider[seededProviders[0]].status === 'complete',
+    `seeded ${seededProviders.length} reports (${seededProviders.join(', ')})`);
+
+  try {
+    const res = await synthesizeTask(browserService, taskId, {
+      maxVerdictRounds: 1,
+      responseTimeoutMs: 240000,
+    });
+    assertInto(details, res.status === 'complete',
+      `synthesis complete (status ${res.status}${res.reason ? `: ${res.reason}` : ''}, ${res.rounds} round(s))`);
+    if (res.status === 'complete') {
+      const body = readFileSync(finalPath(task), 'utf8');
+      assertInto(details, body.length > 400, `FINAL.md is substantial (${body.length} chars)`);
+      assertInto(details, /LTS/i.test(body) && /node/i.test(body), 'FINAL.md is on-topic (mentions Node LTS)');
+      assertInto(details, !/^\s*VERDICT:\s*(AGREE|DISAGREE)\s*$/im.test(body), 'FINAL.md has verdict lines stripped');
+      assertInto(details, existsSync(finalPath(task).replace(/FINAL\.md$/, 'FINAL.meta.json')), 'FINAL.meta.json written');
+    }
+  } finally {
+    markConsensusEnd();
+    await browserService.disconnect();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -770,6 +845,7 @@ export const GATES = {
   compression: gateCompression,
   drivers: gateDrivers,
   researchdr: gateResearchDR,
+  synthesize: gateSynthesize,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */
