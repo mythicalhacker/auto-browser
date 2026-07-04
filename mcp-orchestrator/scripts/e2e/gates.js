@@ -14,7 +14,7 @@ import { dirname, join } from 'path';
 import { McpClient, STATE_DIR } from './mcp-client.js';
 import {
   ensureChrome, cdpReady, weSpawnedChrome, ensureModelTabs, openModelTabs,
-  reduceModelTabsTo, loginStatus, MODEL_URLS,
+  reduceModelTabsTo, loginStatus, freshModelChats, MODEL_URLS,
 } from './chrome.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +22,17 @@ const LEDGER_FILE = join(STATE_DIR, 'ledger.json');
 const LOGINS_FILE = join(STATE_DIR, 'logins.json');
 const LEDGER_LIMIT = 30; // hard per-site cap for the whole run
 const PAUSE_MS = 120000; // minimum gap between consensus runs
+
+// Pin EVERY response-timeout knob: per-model env vars outrank TIMEOUT_RESPONSE
+// in the config precedence, and McpClient spawns with {...process.env}, so an
+// inherited shell TIMEOUT_RESPONSE_<MODEL> would silently defeat a gate that
+// sets only the global var.
+const responseTimeoutEnv = (ms) => ({
+  TIMEOUT_RESPONSE: ms,
+  TIMEOUT_RESPONSE_CLAUDE: ms,
+  TIMEOUT_RESPONSE_CHATGPT: ms,
+  TIMEOUT_RESPONSE_GEMINI: ms,
+});
 
 // --- ledger -----------------------------------------------------------------
 
@@ -252,7 +263,8 @@ export async function gateRace(log) {
     }
     const out = round.outputs[m] || '';
     assertInto(details, out.includes(tokens[m]), `${m}: response echoes own token (${JSON.stringify(out.slice(0, 60))})`);
-    assertInto(details, !out.startsWith('Error:'), `${m}: no send/wait error`);
+    // Since PR-2 failures live in round.errors, never as strings in outputs.
+    assertInto(details, !(m in (round.errors || {})), `${m}: no send/wait/extract failure`);
   }
   await browserService.disconnect();
   return details;
@@ -265,13 +277,17 @@ export async function gateAgreeable(log) {
   if (!usable || usable.length < 2) return ['BLOCKED: needs gateLogins with >=2 usable models first'];
 
   await pauseBetweenConsensusRuns(log);
+  log('opening fresh chats in all model tabs (stale-DOM guard)');
+  await freshModelChats();
   const MAX_ROUNDS = 3;
   // The server sends to EVERY discovered model tab, not just usable ones —
   // charge whatever is actually open right now.
   const openNow = Object.keys(await openModelTabs());
   charge(openNow, MAX_ROUNDS);
 
-  const client = new McpClient({ testName: 'agreeable' });
+  // Extended-thinking models routinely exceed the 120s default on
+  // cross-pollination rounds — a slow think must not read as a hang here.
+  const client = new McpClient({ testName: 'agreeable', env: responseTimeoutEnv('240000') });
   try {
     await client.initialize();
     const res = await client.callTool('start_consensus', {
@@ -279,7 +295,7 @@ export async function gateAgreeable(log) {
       max_rounds: MAX_ROUNDS,
     });
     assertInto(details, res.isError !== true, 'start_consensus accepted');
-    const status = await pollStatus(client);
+    const status = await pollStatus(client, { timeoutMs: 900000 });
     markConsensusEnd();
     assertInto(details, status.includes('consensus_reached'), `terminal status consensus_reached (${status.split('\n')[0]})`);
 
@@ -295,6 +311,9 @@ export async function gateAgreeable(log) {
     const votes = Object.values(lastRound.outputs).map(parseVerdict).filter(Boolean);
     const agrees = votes.filter((v) => v === 'AGREE').length;
     assertInto(details, agrees >= 2, `>=2 line-anchored AGREE votes in final round (got ${agrees} of ${votes.length})`);
+    const agreeOutputs = (state.rounds || []).flatMap((r) => Object.values(r.outputs || {}));
+    assertInto(details, !agreeOutputs.some((o) => typeof o === 'string' && o.includes('Error:')),
+      'quarantine: no Error: strings in any round outputs');
     assertInto(details, state.active === false, 'active flag reset');
     return details;
   } finally {
@@ -325,11 +344,13 @@ export async function gateTimeout(log) {
   if (!usable || usable.length < 2) return ['BLOCKED: needs gateLogins with >=2 usable models first'];
 
   await pauseBetweenConsensusRuns(log);
+  log('opening fresh chats in all model tabs (stale-DOM guard)');
+  await freshModelChats();
   const MAX_ROUNDS = 2;
   const openNow = Object.keys(await openModelTabs());
   charge(openNow, MAX_ROUNDS);
 
-  const client = new McpClient({ testName: 'timeout', env: { TIMEOUT_RESPONSE: '8000' } });
+  const client = new McpClient({ testName: 'timeout', env: responseTimeoutEnv('8000') });
   try {
     await client.initialize();
     const res = await client.callTool('start_consensus', {
@@ -343,11 +364,26 @@ export async function gateTimeout(log) {
 
     const state = readStateFile(client);
     refund(openNow, MAX_ROUNDS - (state.rounds?.length || MAX_ROUNDS));
-    const allOutputs = (state.rounds || []).flatMap((r) => Object.values(r.outputs || {}));
+    // Since PR-2, failures live in each round's errors map — never in outputs.
     // Match the timeout failure SPECIFICALLY — a login/selector failure also
-    // stringifies as 'Error: ...' and must not fake this gate's evidence.
-    const timedOut = allOutputs.filter((o) => typeof o === 'string' && o.includes('Timeout waiting for response'));
+    // lands in errors and must not fake this gate's evidence.
+    const allErrors = (state.rounds || []).flatMap((r) => Object.values(r.errors || {}));
+    const timedOut = allErrors.filter((e) => (e?.message || '').includes('Timeout waiting for response'));
     assertInto(details, timedOut.length >= 1, `>=1 model hit the response timeout specifically (got ${timedOut.length})`);
+    assertInto(details, timedOut.every((e) => e.phase === 'wait'), 'timeout failures carry phase=wait');
+
+    // PR-2 quarantine: no error text in outputs, none embedded in next prompts.
+    const allOutputs = (state.rounds || []).flatMap((r) => Object.values(r.outputs || {}));
+    assertInto(details, !allOutputs.some((o) => typeof o === 'string' && o.includes('Error:')),
+      'quarantine: no Error: strings in any round outputs');
+    const { generateConsensusPrompt } = await import('../../tools/consensus.js');
+    const lastR = state.rounds[state.rounds.length - 1];
+    const everyModel = [...new Set([...Object.keys(lastR.outputs || {}), ...Object.keys(lastR.errors || {})])];
+    const cleanPrompts = everyModel.every((m) => {
+      const p = generateConsensusPrompt(state.originalPrompt, state.rounds, m);
+      return !p.includes('Error:') && !p.includes('Timeout waiting for response');
+    });
+    assertInto(details, everyModel.length > 0 && cleanPrompts, 'quarantine: embedded next-round prompts carry no error text');
     assertInto(details, state.active === false, 'active flag reset after failure-heavy run');
 
     const tools = await client.listTools();

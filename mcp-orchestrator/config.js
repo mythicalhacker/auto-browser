@@ -10,7 +10,16 @@ export const CONFIG = Object.freeze({
   chromeUserData: process.env.CHROME_USER_DATA || resolve(__dirname, '.chrome-debug'),
   timeouts: Object.freeze({
     response: Number(process.env.TIMEOUT_RESPONSE) || 120000,
-    barrier: Number(process.env.TIMEOUT_BARRIER) || 120000,
+    // Per-model response ceilings: extended-thinking models (GPT 5.5 Pro et
+    // al.) routinely think for minutes, so the limit must fit the slowest
+    // normal response, not the median. Precedence: TIMEOUT_RESPONSE_<MODEL>
+    // env > TIMEOUT_RESPONSE env > per-model default. A per-call
+    // response_timeout_ms tool argument beats all of these.
+    responseByModel: Object.freeze({
+      claude: Number(process.env.TIMEOUT_RESPONSE_CLAUDE) || Number(process.env.TIMEOUT_RESPONSE) || 300000,
+      chatgpt: Number(process.env.TIMEOUT_RESPONSE_CHATGPT) || Number(process.env.TIMEOUT_RESPONSE) || 600000,
+      gemini: Number(process.env.TIMEOUT_RESPONSE_GEMINI) || Number(process.env.TIMEOUT_RESPONSE) || 300000,
+    }),
     navigation: Number(process.env.TIMEOUT_NAVIGATION) || 30000,
     action: Number(process.env.TIMEOUT_ACTION) || 10000,
     stabilityCheck: 1000,

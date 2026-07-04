@@ -56,8 +56,10 @@ All optional; defaults in `config.js`.
 | `STATE_FILE` | `mcp-orchestrator/consensus_state.json` | Where consensus state is persisted |
 | `CHROME_PATH` | Windows Chrome path | Chrome binary (used by the launcher utility; set on macOS/Linux) |
 | `CHROME_USER_DATA` | `mcp-orchestrator/.chrome-debug` | Debug profile dir (prefer a path outside the repo) |
-| `TIMEOUT_RESPONSE` | `120000` | Max ms to wait for a model's response |
-| `TIMEOUT_BARRIER` | `120000` | Max ms for a whole round's completion |
+| `TIMEOUT_RESPONSE` | `120000` | Fallback max ms to wait for a model's response |
+| `TIMEOUT_RESPONSE_CLAUDE` | `300000` | Per-model response ceiling (extended-thinking models take minutes) |
+| `TIMEOUT_RESPONSE_CHATGPT` | `600000` | Per-model response ceiling |
+| `TIMEOUT_RESPONSE_GEMINI` | `300000` | Per-model response ceiling |
 | `TIMEOUT_NAVIGATION` | `30000` | Page navigation timeout (ms) |
 | `TIMEOUT_ACTION` | `10000` | Click/selector action timeout (ms) |
 
@@ -72,7 +74,7 @@ All optional; defaults in `config.js`.
 | `connect_browser` | Connect to Chrome on CDP port 9222 |
 | `health_check` | Verify Chrome connection, tabs, and login state |
 | `send_single_round` | Send prompt to all 3 models and wait for responses (single round) |
-| `start_consensus` | Start autonomous consensus workflow (iterates until agreement; `max_rounds` 2–10, default 5) |
+| `start_consensus` | Start autonomous consensus workflow (iterates until agreement; `max_rounds` 2–10, default 5; optional `response_timeout_ms` per-call ceiling for deep-research prompts) |
 | `get_consensus_status` | Check current consensus workflow status and progress |
 | `get_consensus_results` | Get full results from completed or in-progress workflow |
 | `get_last_round` | Get just the last round's outputs |
@@ -95,6 +97,8 @@ VERDICT: AGREE     (or)     VERDICT: DISAGREE
 - `AGREE` must be unhedged (a qualified agree is an abstention); `DISAGREE` tolerates a trailing clause so a hedged dissent still blocks.
 - Consensus requires **≥ 2 AGREE votes and zero DISAGREE** among models that responded.
 - Peer verdict lines are stripped before responses are cross-pollinated, so a quoted answer can't cast a spurious vote.
+- Failed models are quarantined: their error text never enters cross-pollination or results — peers see a neutral "did not respond this round" note instead.
+- Dissent is sticky across failures: if a model's last cast vote was DISAGREE and it fails a later round, its dissent still blocks consensus until it responds again.
 - Runs abort immediately with `insufficient_models` when fewer than 2 model tabs are open.
 
 ---

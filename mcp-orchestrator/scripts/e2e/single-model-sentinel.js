@@ -47,7 +47,7 @@ const body = await page.innerText('body').catch(() => '');
 const checks = [
   [body.includes(token), `page body contains sentinel (user message registered via insertText)`],
   [out.includes(token), `response echoes sentinel (got: ${JSON.stringify(out.slice(0, 80))})`],
-  [!out.startsWith('Error:'), `no send/wait error`],
+  [!(MODEL in (round.errors || {})), `no send/wait/extract failure (${JSON.stringify(round.errors?.[MODEL] || null)})`],
   [(round.timing?.[MODEL] ?? 0) > 0, `timing recorded (${round.timing?.[MODEL]}ms)`],
 ];
 let failed = 0;

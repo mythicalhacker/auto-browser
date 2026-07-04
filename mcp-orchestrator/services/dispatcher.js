@@ -35,6 +35,7 @@ async function executeConsensus(browserService, prompt) {
   return {
     model: 'consensus',
     output: round.outputs,
+    errors: round.errors,
     time: round.duration
   };
 }
@@ -124,9 +125,12 @@ export async function handleDispatchToolCall(name, args, browserService) {
     case 'task_run': {
       try {
         const result = await dispatchTask(args.task_id, browserService);
-        const output = typeof result.output === 'object'
+        let output = typeof result.output === 'object'
           ? Object.entries(result.output).map(([m, o]) => `=== ${m.toUpperCase()} ===\n${o}`).join('\n\n')
           : result.output;
+        const failures = Object.entries(result.errors || {})
+          .map(([m, e]) => `=== ${m.toUpperCase()} — FAILED (${e.phase}) ===\n${e.message}`).join('\n\n');
+        if (failures) output = output ? `${output}\n\n${failures}` : failures;
         return { content: [{ type: 'text', text: `Task ${args.task_id} completed (${(result.time / 1000).toFixed(1)}s)\nModel: ${result.model}\n\n${output}` }] };
       } catch (err) {
         return { content: [{ type: 'text', text: `Task ${args.task_id} failed: ${err.message}` }] };

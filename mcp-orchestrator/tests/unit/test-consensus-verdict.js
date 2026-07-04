@@ -82,28 +82,31 @@ async function runTests() {
   assert(stripVerdictLines('No verdict here at all.') === 'No verdict here at all.', 'non-verdict text untouched');
   assert(parseVerdict(stripVerdictLines('Answer.\nVERDICT: AGREE\nMore.\nVERDICT: DISAGREE')) === null, 'stripped output has no parseable verdict');
 
-  // --- checkConsensusReached ---
+  // --- checkConsensusReached (rounds-based since PR-2) ---
   console.log('\ncheckConsensusReached:');
 
   const agree = 'Synthesis...\nVERDICT: AGREE';
   const disagree = 'Still differs.\nVERDICT: DISAGREE';
   const noVerdict = 'A substantive answer with no verdict line.';
-  const errorOut = 'Error: Timeout waiting for response';
+  const failWait = { message: 'Timeout waiting for response', phase: 'wait' };
+  // Single-round history helper: outputs (+ optional errors) as current round.
+  const r1 = (outputs, errors = {}) => [{ round: 1, outputs, errors }];
 
-  assert(checkConsensusReached({ claude: agree, chatgpt: agree, gemini: agree }) === true, '3x AGREE reaches consensus');
-  assert(checkConsensusReached({ claude: agree, chatgpt: agree, gemini: noVerdict }) === true, '2x AGREE + abstention reaches consensus');
-  assert(checkConsensusReached({ claude: agree, chatgpt: agree, gemini: errorOut }) === true, '2x AGREE + failed model reaches consensus');
-  assert(checkConsensusReached({ claude: agree, chatgpt: agree, gemini: disagree }) === false, 'any DISAGREE blocks consensus');
-  assert(checkConsensusReached({ claude: agree, chatgpt: agree, gemini: 'VERDICT: DISAGREE — but close' }) === false, 'hedged DISAGREE blocks consensus');
-  assert(checkConsensusReached({ claude: agree, chatgpt: noVerdict, gemini: noVerdict }) === false, 'single AGREE is not consensus');
-  assert(checkConsensusReached({ claude: noVerdict, chatgpt: noVerdict, gemini: noVerdict }) === false, 'no verdicts is not consensus');
-  assert(checkConsensusReached({ claude: errorOut, chatgpt: errorOut, gemini: errorOut }) === false, 'all-failed round is not consensus');
-  assert(checkConsensusReached({}) === false, 'empty outputs is not consensus');
-  assert(checkConsensusReached(undefined) === false, 'missing outputs is not consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: agree, gemini: agree })) === true, '3x AGREE reaches consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: agree, gemini: noVerdict })) === true, '2x AGREE + abstention reaches consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: agree }, { gemini: failWait })) === true, '2x AGREE + failed never-voter reaches consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: agree, gemini: disagree })) === false, 'any DISAGREE blocks consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: agree, gemini: 'VERDICT: DISAGREE — but close' })) === false, 'hedged DISAGREE blocks consensus');
+  assert(checkConsensusReached(r1({ claude: agree, chatgpt: noVerdict, gemini: noVerdict })) === false, 'single AGREE is not consensus');
+  assert(checkConsensusReached(r1({ claude: noVerdict, chatgpt: noVerdict, gemini: noVerdict })) === false, 'no verdicts is not consensus');
+  assert(checkConsensusReached(r1({}, { claude: failWait, chatgpt: failWait, gemini: failWait })) === false, 'all-failed round is not consensus');
+  assert(checkConsensusReached(r1({})) === false, 'empty outputs is not consensus');
+  assert(checkConsensusReached([]) === false, 'empty rounds is not consensus');
+  assert(checkConsensusReached(undefined) === false, 'missing rounds is not consensus');
 
   // Regressions for the substring-detection bug
-  assert(checkConsensusReached({ claude: 'CONSENSUS REACHED, final output: ...', chatgpt: noVerdict, gemini: noVerdict }) === false, 'legacy phrase echo no longer terminates');
-  assert(checkConsensusReached({ claude: 'NO CONSENSUS REACHED yet', chatgpt: agree, gemini: agree }) === true, 'denial prose does not block explicit AGREE votes');
+  assert(checkConsensusReached(r1({ claude: 'CONSENSUS REACHED, final output: ...', chatgpt: noVerdict, gemini: noVerdict })) === false, 'legacy phrase echo no longer terminates');
+  assert(checkConsensusReached(r1({ claude: 'NO CONSENSUS REACHED yet', chatgpt: agree, gemini: agree })) === true, 'denial prose does not block explicit AGREE votes');
 
   // --- generateConsensusPrompt ---
   console.log('\ngenerateConsensusPrompt:');
@@ -149,6 +152,10 @@ async function runTests() {
   await assertThrows(() => handleConsensusToolCall('start_consensus', { prompt: 'x', max_rounds: 'many' }, null), 'non-numeric string max_rounds throws');
   await assertThrows(() => handleConsensusToolCall('send_single_round', {}, null), 'send_single_round without prompt throws');
   await assertThrows(() => handleConsensusToolCall('send_single_round', { prompt: '' }, null), 'send_single_round with empty prompt throws');
+  await assertThrows(() => handleConsensusToolCall('start_consensus', { prompt: 'x', response_timeout_ms: 500 }, null), 'response_timeout_ms below 1s throws');
+  await assertThrows(() => handleConsensusToolCall('start_consensus', { prompt: 'x', response_timeout_ms: 10800000 }, null), 'response_timeout_ms above 2h throws');
+  await assertThrows(() => handleConsensusToolCall('start_consensus', { prompt: 'x', response_timeout_ms: 'fast' }, null), 'non-numeric response_timeout_ms throws');
+  await assertThrows(() => handleConsensusToolCall('send_single_round', { prompt: 'x', response_timeout_ms: 0 }, null), 'send_single_round validates response_timeout_ms too');
 
   // Numeric strings are coerced (MCP clients often emit numbers as strings).
   // The mock's connect() rejects, so the fire-and-forget workflow dies
@@ -156,6 +163,9 @@ async function runTests() {
   const failingBS = { connect: async () => { throw new Error('no chrome in unit test'); } };
   const coerced = await handleConsensusToolCall('start_consensus', { prompt: 'q', max_rounds: '3' }, failingBS);
   assert(coerced.content[0].text.includes('Max rounds: 3'), 'numeric-string max_rounds is coerced and accepted');
+  await new Promise(r => setTimeout(r, 50)); // let the rejected workflow settle
+  const coercedTimeout = await handleConsensusToolCall('start_consensus', { prompt: 'q', max_rounds: '3', response_timeout_ms: '30000' }, failingBS);
+  assert(coercedTimeout.content[0].text.includes('Consensus workflow started'), 'numeric-string response_timeout_ms is coerced and accepted');
   await new Promise(r => setTimeout(r, 50)); // let the rejected workflow settle
 
   // --- insufficient-models guard ---

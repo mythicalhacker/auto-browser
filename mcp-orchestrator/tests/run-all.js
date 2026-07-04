@@ -73,6 +73,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Error Quarantine",
+    file: "unit/test-error-quarantine.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Chrome Connection",
     file: "integration/test-chrome.js",
     critical: true,

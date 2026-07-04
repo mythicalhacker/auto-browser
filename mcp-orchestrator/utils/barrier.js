@@ -1,54 +1,58 @@
 /**
- * ConsensusBarrier
- * Ensures all models complete before proceeding to next round
+ * ConsensusBarrier — per-round result collector with failure quarantine.
+ *
+ * The real synchronization barrier is the pair of Promise.all blocks in
+ * runConsensusRound; this class dedups marks (first mark wins), reports
+ * progress, and keeps failures OUT of outputs: a failed model's error lives
+ * exclusively in the errors map, so error text can never be cross-pollinated
+ * to peers or rendered as an answer.
  */
 
 export class ConsensusBarrier {
-  constructor(models, timeout = 120000) {
+  constructor(models) {
     this.models = models;
-    this.timeout = timeout;
     this.completed = new Map();
     this.failed = new Map();
     this.startTime = Date.now();
   }
-  
+
   markComplete(model, output) {
     if (this.completed.has(model) || this.failed.has(model)) {
       console.error(`Barrier: ${model} already marked, ignoring duplicate`);
       return;
     }
-    this.completed.set(model, { 
-      output, 
+    this.completed.set(model, {
+      output,
       timestamp: Date.now(),
       duration: Date.now() - this.startTime
     });
     console.error(`Barrier: ${model} completed (${this.completed.size}/${this.models.length})`);
   }
-  
-  markFailed(model, error) {
+
+  markFailed(model, error, phase = 'unknown') {
     if (this.completed.has(model) || this.failed.has(model)) {
       console.error(`Barrier: ${model} already marked, ignoring duplicate`);
       return;
     }
-    this.failed.set(model, { 
-      error, 
+    this.failed.set(model, {
+      error,
+      phase,
       timestamp: Date.now(),
       duration: Date.now() - this.startTime
     });
-    console.error(`Barrier: ${model} failed - ${error}`);
+    console.error(`Barrier: ${model} failed during ${phase} - ${error}`);
   }
-  
+
   isComplete() {
-    const total = this.completed.size + this.failed.size;
-    return total >= this.models.length;
+    return this.completed.size + this.failed.size >= this.models.length;
   }
-  
+
   getPendingModels() {
-    return this.models.filter(m => 
+    return this.models.filter(m =>
       !this.completed.has(m) && !this.failed.has(m)
     );
   }
-  
+
   getStatus() {
     return {
       completed: this.completed.size,
@@ -58,39 +62,27 @@ export class ConsensusBarrier {
       elapsed: Date.now() - this.startTime
     };
   }
-  
-  async waitForAll() {
-    while (!this.isComplete()) {
-      if (Date.now() - this.startTime > this.timeout) {
-        const pending = this.getPendingModels();
-        throw new Error(`Barrier timeout after ${this.timeout}ms. Pending: ${pending.join(', ')}`);
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-    
-    return {
-      completed: Object.fromEntries(this.completed),
-      failed: Object.fromEntries(this.failed),
-      totalTime: Date.now() - this.startTime
-    };
-  }
-  
+
+  /**
+   * outputs: successful models only — never contains error text.
+   * errors:  { model: { message, phase } } for failed models only.
+   * timing:  everyone, success or failure (feeds latency stats).
+   */
   getResults() {
     const outputs = {};
     const timing = {};
     const errors = {};
-    
+
     for (const [model, data] of this.completed) {
       outputs[model] = data.output;
       timing[model] = data.duration;
     }
-    
+
     for (const [model, data] of this.failed) {
-      outputs[model] = `Error: ${data.error}`;
-      errors[model] = data.error;
+      errors[model] = { message: data.error, phase: data.phase };
       timing[model] = data.duration;
     }
-    
+
     return { outputs, timing, errors };
   }
 }
@@ -106,21 +98,21 @@ export function sleep(ms) {
  * Retry utility with exponential backoff
  */
 export async function withRetry(fn, options = {}) {
-  const { 
-    maxRetries = 3, 
-    initialDelay = 1000, 
+  const {
+    maxRetries = 3,
+    initialDelay = 1000,
     maxDelay = 10000,
-    onRetry = null 
+    onRetry = null
   } = options;
-  
+
   let lastError;
-  
+
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await fn();
     } catch (e) {
       lastError = e;
-      
+
       if (i < maxRetries - 1) {
         const delay = Math.min(initialDelay * Math.pow(2, i), maxDelay);
         if (onRetry) onRetry(i + 1, delay, e);
@@ -128,6 +120,6 @@ export async function withRetry(fn, options = {}) {
       }
     }
   }
-  
+
   throw lastError;
 }

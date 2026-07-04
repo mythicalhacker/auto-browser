@@ -58,11 +58,15 @@ export async function sendToModel(browserService, model, prompt) {
   return true;
 }
 
-export async function waitForComplete(browserService, page, model, initialCount, timeout = CONFIG.timeouts.response) {
+export async function waitForComplete(browserService, page, model, initialCount, timeout = null) {
   const sel = SELECTORS[model];
+  // Per-call override > per-model config > generic default. Extended-thinking
+  // models legitimately take minutes to respond; a slow think must not be
+  // misread as a hang (see config.timeouts.responseByModel).
+  const limit = timeout ?? CONFIG.timeouts.responseByModel?.[model] ?? CONFIG.timeouts.response;
   const start = Date.now();
 
-  while (Date.now() - start < timeout) {
+  while (Date.now() - start < limit) {
     const elements = await findAll(page, sel.output);
     if (elements.length > initialCount) {
       const streamMatch = await findFirst(page, sel.streaming);
@@ -79,7 +83,7 @@ export async function waitForComplete(browserService, page, model, initialCount,
     }
     await page.waitForTimeout(1000);
   }
-  return { complete: false, time: timeout };
+  return { complete: false, time: limit };
 }
 
 export async function getOutput(browserService, model) {
@@ -104,9 +108,9 @@ export async function getOutput(browserService, model) {
   return text;
 }
 
-export async function runConsensusRound(browserService, prompts, roundNum) {
+export async function runConsensusRound(browserService, prompts, roundNum, opts = {}) {
   const activeModels = browserService.getActiveModels();
-  const barrier = new ConsensusBarrier(activeModels, CONFIG.timeouts.barrier);
+  const barrier = new ConsensusBarrier(activeModels);
 
   // Normalize prompts: if string, make object with same prompt for all
   const modelPrompts = typeof prompts === 'string'
@@ -117,6 +121,7 @@ export async function runConsensusRound(browserService, prompts, roundNum) {
     round: roundNum,
     prompts: {},
     outputs: {},
+    errors: {},
     timing: {},
     startTime: Date.now()
   };
@@ -133,36 +138,36 @@ export async function runConsensusRound(browserService, prompts, roundNum) {
     try {
       await sendToModel(browserService, model, modelPrompts[model]);
     } catch (e) {
-      barrier.markFailed(model, e.message);
+      barrier.markFailed(model, e.message, 'send');
     }
   }));
 
-  // Wait for completions using barrier
+  // Wait for completions — this Promise.all IS the round barrier: every
+  // model is marked complete or failed by the time it resolves.
   await Promise.all(activeModels.map(async (model) => {
     if (barrier.failed.has(model)) return;
+    let result;
     try {
-      const result = await waitForComplete(browserService, browserService.getPage(model), model, initial[model], CONFIG.timeouts.response);
-      if (result.complete) {
-        const output = await getOutput(browserService, model);
-        barrier.markComplete(model, output);
-      } else {
-        barrier.markFailed(model, "Timeout waiting for response");
-      }
+      result = await waitForComplete(browserService, browserService.getPage(model), model, initial[model], opts.responseTimeoutMs ?? null);
     } catch (e) {
-      barrier.markFailed(model, e.message);
+      barrier.markFailed(model, e.message, 'wait');
+      return;
+    }
+    if (!result.complete) {
+      barrier.markFailed(model, "Timeout waiting for response", 'wait');
+      return;
+    }
+    try {
+      const output = await getOutput(browserService, model);
+      barrier.markComplete(model, output);
+    } catch (e) {
+      barrier.markFailed(model, e.message, 'extract');
     }
   }));
 
-  // Wait for barrier to release (ensures all models done)
-  try {
-    await barrier.waitForAll();
-  } catch (e) {
-    console.error("Barrier error:", e.message);
-  }
-
-  // Use barrier results directly
   const barrierResults = barrier.getResults();
   roundData.outputs = barrierResults.outputs;
+  roundData.errors = barrierResults.errors;
   roundData.timing = barrierResults.timing;
 
   roundData.endTime = Date.now();
@@ -187,14 +192,24 @@ export function generateConsensusPrompt(originalPrompt, rounds, excludeModel = n
 
   const modelCount = otherModels.length;
 
+  // Failed peers are OMITTED from the response blocks: never their error text
+  // (peers cast DISAGREE against a timeout message — observed live), and
+  // never a look-alike answer block a peer could judge as a non-answer and
+  // dissent against either. One neutral note OUTSIDE the answer structure
+  // keeps models from guessing why a peer vanished; not verdict-parseable.
+  const failedPeers = Object.keys(lastRound.errors || {}).filter((m) => m !== excludeModel);
+  const failureNote = failedPeers.length > 0
+    ? `\n\n(Note: ${failedPeers.join(', ')} did not respond this round. Judge only the responses shown above.)`
+    : '';
+
   let prompt = `CONSENSUS REVIEW - Round ${rounds.length + 1}
 
 ORIGINAL REQUEST:
 ${originalPrompt}
 
-RESPONSES FROM ${modelCount} OTHER AI MODEL${modelCount > 1 ? 'S' : ''}:
+RESPONSES FROM ${modelCount} OTHER AI MODEL${modelCount === 1 ? '' : 'S'}:
 
-${responsesText}
+${responsesText}${failureNote}
 
 ---
 
@@ -240,13 +255,38 @@ export function stripVerdictLines(output) {
     .trim();
 }
 
-export function checkConsensusReached(outputs) {
-  // Models that failed or omitted a verdict don't vote.
-  const votes = Object.values(outputs || {}).map(parseVerdict).filter(Boolean);
+/**
+ * Consensus over the full rounds history (not just the current round):
+ * current-round responders vote via their verdict lines; a model that FAILED
+ * the current round but whose last cast vote was DISAGREE keeps blocking
+ * (dissent is sticky across failures — a dissenter's timeout must not flip a
+ * split round into consensus). A carried AGREE is NOT counted: agreement has
+ * to come from a live response. Failed never-voters are pure abstentions.
+ */
+export function checkConsensusReached(rounds) {
+  if (!Array.isArray(rounds) || rounds.length === 0) return false;
+  const current = rounds[rounds.length - 1];
+
+  const votes = [];
+  for (const output of Object.values(current.outputs || {})) {
+    const v = parseVerdict(output);
+    if (v) votes.push(v);
+  }
+
+  for (const model of Object.keys(current.errors || {})) {
+    for (let i = rounds.length - 2; i >= 0; i--) {
+      const carried = parseVerdict(rounds[i].outputs?.[model]);
+      if (carried) {
+        if (carried === "DISAGREE") votes.push("DISAGREE");
+        break; // last cast vote found — a carried AGREE contributes nothing
+      }
+    }
+  }
+
   return votes.length >= 2 && votes.every(v => v === "AGREE");
 }
 
-async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
+async function runFullConsensus(browserService, originalPrompt, maxRounds = 5, responseTimeoutMs = null) {
   consensusState = {
     active: true,
     originalPrompt,
@@ -274,7 +314,7 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
   consensusState.status = "round_1_sending";
   saveState();
 
-  const round1 = await runConsensusRound(browserService, originalPrompt, 1);
+  const round1 = await runConsensusRound(browserService, originalPrompt, 1, { responseTimeoutMs });
   consensusState.rounds.push(round1);
   consensusState.currentRound = 1;
   saveState();
@@ -292,14 +332,15 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
       roundPrompts[model] = generateConsensusPrompt(originalPrompt, consensusState.rounds, model);
     }
 
-    const roundData = await runConsensusRound(browserService, roundPrompts, i);
+    const roundData = await runConsensusRound(browserService, roundPrompts, i, { responseTimeoutMs });
     consensusState.rounds.push(roundData);
     consensusState.currentRound = i;
 
     // Check the round that was just asked for verdicts — round 1 carries no
     // verdict instruction, and checking after the send counts the final
-    // round's votes too.
-    const reached = checkConsensusReached(roundData.outputs);
+    // round's votes too. Pass the whole history: dissent carry-forward needs
+    // failed models' prior votes.
+    const reached = checkConsensusReached(consensusState.rounds);
     if (reached) {
       consensusState.status = "consensus_reached";
       consensusState.finalConsensus = roundData.outputs;
@@ -336,6 +377,14 @@ function getStatusSummary() {
     for (const [model, output] of Object.entries(lastRound.outputs || {})) {
       summary += `  ${model}: ${output?.length || 0} chars\n`;
     }
+
+    const lastErrors = Object.entries(lastRound.errors || {});
+    if (lastErrors.length > 0) {
+      summary += `\nLast round failures:\n`;
+      for (const [model, e] of lastErrors) {
+        summary += `  ${model}: ${e.message} (${e.phase})\n`;
+      }
+    }
   }
 
   return summary;
@@ -357,6 +406,10 @@ function getFullResults() {
       result += `### ${model.toUpperCase()}\n`;
       result += `${output}\n\n`;
     }
+    for (const [model, e] of Object.entries(round.errors || {})) {
+      result += `### ${model.toUpperCase()} — FAILED (${e.phase})\n`;
+      result += `${e.message}\n\n`;
+    }
     result += `---\n\n`;
   }
 
@@ -373,7 +426,8 @@ const CONSENSUS_TOOLS = [
       type: "object",
       properties: {
         prompt: { type: "string", description: "The task/prompt to reach consensus on" },
-        max_rounds: { type: "integer", default: 5, minimum: 2, maximum: 10, description: "Maximum iteration rounds (2-10)" }
+        max_rounds: { type: "integer", default: 5, minimum: 2, maximum: 10, description: "Maximum iteration rounds (2-10)" },
+        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms for this run (deep-research prompts need far longer than chat). Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." }
       },
       required: ["prompt"]
     }
@@ -403,7 +457,10 @@ const CONSENSUS_TOOLS = [
     description: "Send prompt to all 3 models and wait for responses (single round, no iteration)",
     inputSchema: {
       type: "object",
-      properties: { prompt: { type: "string" } },
+      properties: {
+        prompt: { type: "string" },
+        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms. Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." }
+      },
       required: ["prompt"]
     }
   },
@@ -427,6 +484,17 @@ function requirePrompt(args, toolName) {
   }
 }
 
+// Optional per-call response ceiling; null means "use per-model config".
+// Number() coercion keeps numeric strings working, like max_rounds.
+function parseResponseTimeoutMs(args) {
+  if (args?.response_timeout_ms == null) return null;
+  const v = Number(args.response_timeout_ms);
+  if (!Number.isInteger(v) || v < 1000 || v > 7200000) {
+    throw new Error("'response_timeout_ms' must be an integer between 1000 (1s) and 7200000 (2h)");
+  }
+  return v;
+}
+
 export async function handleConsensusToolCall(name, args, browserService) {
   if (!CONSENSUS_TOOL_NAMES.has(name)) return null;
 
@@ -445,10 +513,11 @@ export async function handleConsensusToolCall(name, args, browserService) {
       if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 10) {
         throw new Error("'max_rounds' must be an integer between 2 and 10");
       }
+      const responseTimeoutMs = parseResponseTimeoutMs(args);
 
       // CRITICAL: fire-and-forget — do NOT await runFullConsensus.
       // .catch() uses module-scoped consensusState and saveState.
-      runFullConsensus(browserService, args.prompt, maxRounds).catch(e => {
+      runFullConsensus(browserService, args.prompt, maxRounds, responseTimeoutMs).catch(e => {
         consensusState.status = `error: ${e.message}`;
         saveState();
       });
@@ -472,15 +541,22 @@ export async function handleConsensusToolCall(name, args, browserService) {
       for (const [m, o] of Object.entries(last.outputs)) {
         output += `=== ${m.toUpperCase()} ===\n${o}\n\n`;
       }
+      for (const [m, e] of Object.entries(last.errors || {})) {
+        output += `=== ${m.toUpperCase()} — FAILED (${e.phase}) ===\n${e.message}\n\n`;
+      }
       return { content: [{ type: "text", text: output }] };
 
     case "send_single_round": {
       requirePrompt(args, "send_single_round");
+      const responseTimeoutMs = parseResponseTimeoutMs(args);
       await browserService.connect();
-      const round = await runConsensusRound(browserService, args.prompt, 1);
+      const round = await runConsensusRound(browserService, args.prompt, 1, { responseTimeoutMs });
       let result = `Round complete (${(round.duration/1000).toFixed(1)}s)\n\n`;
       for (const [m, o] of Object.entries(round.outputs)) {
         result += `=== ${m.toUpperCase()} ===\n${o}\n\n`;
+      }
+      for (const [m, e] of Object.entries(round.errors || {})) {
+        result += `=== ${m.toUpperCase()} — FAILED (${e.phase}) ===\n${e.message}\n\n`;
       }
       return { content: [{ type: "text", text: result }] };
     }

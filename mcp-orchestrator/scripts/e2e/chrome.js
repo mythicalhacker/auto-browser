@@ -155,6 +155,34 @@ export async function ensureModelTabs(models = Object.keys(MODEL_URLS)) {
   return { browser, pages };
 }
 
+/**
+ * Navigate each open model tab to its new-chat entry URL. Live consensus
+ * gates call this first so a PRIOR gate's conversation can never satisfy
+ * waitForComplete's count check and be extracted as a fresh response
+ * (observed live 2026-07-04: race-gate sentinel returned as round-1 output).
+ * Never closes tabs; never touches non-model tabs.
+ */
+export async function freshModelChats() {
+  const browser = await chromium.connectOverCDP(CDP_URL);
+  try {
+    const ctx = browser.contexts()[0];
+    for (const page of ctx ? ctx.pages() : []) {
+      const url = page.url();
+      for (const [model, pattern] of Object.entries(PATTERNS)) {
+        if (url.includes(pattern)) {
+          // Mirror the product's discovery rule: claude.ai/chrome/* pages are
+          // NOT model tabs (browser-service excludes them) — never navigate one.
+          if (model === 'claude' && url.includes('/chrome/')) continue;
+          await page.goto(MODEL_URLS[model], { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await page.waitForTimeout(3000); // SPA settle before selector queries
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
 /** List which models currently have an open tab (no side effects). */
 export async function openModelTabs() {
   const browser = await chromium.connectOverCDP(CDP_URL);
