@@ -87,6 +87,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Config Defaults",
+    file: "unit/test-config-defaults.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Chrome Connection",
     file: "integration/test-chrome.js",
     critical: true,

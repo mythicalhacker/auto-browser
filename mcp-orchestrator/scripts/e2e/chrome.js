@@ -2,7 +2,7 @@
 // Policy: if port 9222 is already serving CDP we REUSE that Chrome and never
 // kill it or close its tabs; we only ever stop/manage a Chrome we spawned
 // ourselves (pid recorded in .state/chrome.pid).
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve } from 'path';
@@ -101,6 +101,36 @@ export async function ensureChrome({ profileDir } = {}) {
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error('Chrome CDP did not become ready within 45s');
+}
+
+/**
+ * Adopt an already-running Chrome as harness-owned. Used after gateColdStart:
+ * the SERVER (a child we spawned and killed) auto-launched Chrome detached,
+ * so no pid record exists and cleanup/re-runs would be blocked. Adoption
+ * demands proof it is ours: the process listening on the CDP port must carry
+ * `mustIncludeArg` (e.g. our profile path) on its command line.
+ * @returns {Promise<boolean>} true if ownership was recorded
+ */
+export async function adoptRunningChrome(mustIncludeArg) {
+  const version = await cdpVersion();
+  if (!version) return false;
+  let port = '9222';
+  try {
+    port = new URL(CDP_URL).port || '9222';
+  } catch {
+    // keep default
+  }
+  const lsof = spawnSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8' });
+  const pids = (lsof.stdout || '').trim().split('\n').filter(Boolean).map(Number);
+  for (const pid of pids) {
+    const ps = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+    if ((ps.stdout || '').includes(mustIncludeArg)) {
+      mkdirSync(STATE_DIR, { recursive: true });
+      writeFileSync(PID_FILE, JSON.stringify({ pid, wsUrl: version.webSocketDebuggerUrl }));
+      return true;
+    }
+  }
+  return false;
 }
 
 /** True only if the CURRENT Chrome on :9222 is one this harness spawned. */

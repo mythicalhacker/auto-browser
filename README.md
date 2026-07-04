@@ -17,16 +17,18 @@ Instead of paying for three APIs, Auto_Browser attaches to a Chrome instance you
 
 Runs anywhere Chrome and Node.js ≥ 20 run.
 
-1. **Start Chrome with remote debugging**, using a dedicated profile directory (keep it out of version control and outside the repo — it holds real browser credentials):
+1. **Start Chrome with remote debugging** — or don't: the server auto-launches a debug Chrome on first connect (disable with `AUTO_LAUNCH_CHROME=0`). The profile lives at `~/.auto-browser/chrome-profile`, outside the repo — it holds real browser credentials.
 
-   macOS / Linux:
+   Manual start, macOS / Linux:
    ```bash
-   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-     --remote-debugging-port=9222 --user-data-dir="$HOME/.auto-browser/chrome-profile"
+   mcp-orchestrator/scripts/start-chrome-debug.sh
    ```
-   Windows: run `mcp-orchestrator/start-chrome-debug.bat`, or start `chrome.exe` with the same two flags.
+   Manual start, Windows:
+   ```
+   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.auto-browser\chrome-profile"
+   ```
 
-2. **Log in** to claude.ai, chatgpt.com, and gemini.google.com in that Chrome instance.
+2. **Log in** to claude.ai, chatgpt.com, and gemini.google.com in that Chrome instance (once — sessions persist in the profile).
 
 3. **Register the MCP server** in `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`):
    ```json

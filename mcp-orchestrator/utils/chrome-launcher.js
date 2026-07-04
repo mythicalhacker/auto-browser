@@ -1,128 +1,109 @@
-// utils/chrome-launcher.js - Auto-launch Chrome with CDP debugging port
-import { exec } from 'child_process';
-import { request as httpRequest } from 'http';
-import { request as httpsRequest } from 'https';
+// utils/chrome-launcher.js — Auto-launch the debug Chrome with a CDP port.
+// Cross-platform: child_process.spawn (detached, no shell) — never the
+// Windows-only exec('start "" ...') this file used before.
+import { spawn } from 'child_process';
+import { statSync, mkdirSync } from 'fs';
 import { CONFIG } from '../config.js';
 
 const DEFAULT_CDP_HOST = '127.0.0.1';
 const DEFAULT_CDP_PORT = '9222';
 
-function parseCdpTarget(cdpUrl) {
+export function parseCdpTarget(cdpUrl) {
   const fallback = { protocol: 'http:', host: DEFAULT_CDP_HOST, port: DEFAULT_CDP_PORT };
-
-  if (!cdpUrl || typeof cdpUrl !== 'string') {
-    console.error('[chrome-launcher] CONFIG.cdpUrl missing or invalid; using default 127.0.0.1:9222');
-    return fallback;
-  }
-
-  let url;
+  if (!cdpUrl || typeof cdpUrl !== 'string') return fallback;
+  // 'localhost:9223' parses as a URL with protocol 'localhost:' — only accept
+  // http(s), otherwise re-parse with an explicit scheme.
+  let url = null;
   try {
     url = new URL(cdpUrl);
   } catch {
+    url = null;
+  }
+  if (!url || !/^https?:$/.test(url.protocol)) {
     try {
       url = new URL(`http://${cdpUrl}`);
     } catch {
-      console.error('[chrome-launcher] CONFIG.cdpUrl could not be parsed; using default 127.0.0.1:9222');
       return fallback;
     }
   }
-
+  if (!/^https?:$/.test(url.protocol) || !url.hostname) return fallback;
   return {
-    protocol: url.protocol || fallback.protocol,
-    host: url.hostname || fallback.host,
-    port: url.port || fallback.port
+    protocol: url.protocol,
+    host: url.hostname,
+    port: url.port || fallback.port,
   };
 }
 
 async function isCdpAvailable(protocol, host, port, timeoutMs = 2000) {
-  const path = '/json/version';
-  const targetUrl = `${protocol}//${host}:${port}${path}`;
-
-  if (typeof fetch === 'function') {
-    let timeoutId;
-    let signal;
-
-    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-      signal = AbortSignal.timeout(timeoutMs);
-    } else if (typeof AbortController !== 'undefined') {
-      const controller = new AbortController();
-      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      signal = controller.signal;
-    }
-
-    try {
-      const response = await fetch(targetUrl, { signal });
-      return response.ok;
-    } catch {
-      return false;
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
-    }
-  }
-
-  const isHttps = protocol === 'https:';
-  const request = isHttps ? httpsRequest : httpRequest;
-
-  return await new Promise((resolve) => {
-    const req = request(
-      { hostname: host, port: Number(port), path, method: 'GET', timeout: timeoutMs },
-      (res) => {
-        res.resume();
-        resolve(res.statusCode >= 200 && res.statusCode < 300);
-      }
-    );
-
-    req.on('timeout', () => {
-      req.destroy(new Error('timeout'));
-      resolve(false);
+  try {
+    const r = await fetch(`${protocol}//${host}:${port}/json/version`, {
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    req.on('error', () => resolve(false));
-    req.end();
-  });
+    return r.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Attempt to connect to Chrome CDP. If connection fails, launch Chrome with debug flags.
- * Returns true if Chrome is ready (either already running or just launched).
- *
- * @param {number} maxWaitMs - Maximum time to wait for Chrome to start (default: 5000)
- * @returns {Promise<boolean>}
+ * Ensure a debug Chrome serves CDP: reuse a running one (never killed by
+ * us), else spawn the configured binary detached against the configured
+ * profile and poll until ready.
+ * @returns {Promise<{up: boolean, launched: boolean}>}
+ *   up       — CDP answers on the configured target
+ *   launched — WE spawned this Chrome (false for a reused one; callers must
+ *              not treat a reused Chrome's tab set as theirs to change)
  */
-export async function ensureChromeRunning(maxWaitMs = 5000) {
+export async function ensureChromeRunning(maxWaitMs = 45000) {
   const { protocol, host, port } = parseCdpTarget(CONFIG.cdpUrl);
-  console.error(`[chrome-launcher] CDP target ${protocol}//${host}:${port}`);
 
   if (await isCdpAvailable(protocol, host, port)) {
-    console.error('[chrome-launcher] Chrome already running on CDP port ' + port);
-    return true;
+    return { up: true, launched: false };
   }
 
   const chromePath = CONFIG.chromePath;
   const userDataDir = CONFIG.chromeUserData;
-
-  if (!chromePath || !userDataDir) {
-    console.error('[chrome-launcher] Missing CONFIG.chromePath or CONFIG.chromeUserData; cannot launch Chrome');
-    return false;
+  let stat = null;
+  try {
+    stat = statSync(chromePath);
+  } catch {
+    stat = null;
+  }
+  // isFile: existsSync alone passes for the .app bundle DIRECTORY on macOS,
+  // which spawn cannot execute.
+  if (!stat || !stat.isFile()) {
+    console.error(`[chrome-launcher] Chrome binary not found at '${chromePath}' — set CHROME_PATH`);
+    return { up: false, launched: false };
   }
 
-  console.error('[chrome-launcher] Chrome not found on CDP target, launching...');
-  const cmd = `start "" "${chromePath}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}"`;
-
-  exec(cmd, (error) => {
-    if (error) {
-      console.error('[chrome-launcher] Failed to launch Chrome:', error.message);
-    }
+  mkdirSync(userDataDir, { recursive: true });
+  console.error(`[chrome-launcher] launching Chrome with profile ${userDataDir}`);
+  let spawnFailed = false;
+  const child = spawn(
+    chromePath,
+    [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
+    { detached: true, stdio: 'ignore' }
+  );
+  child.on('error', (e) => {
+    spawnFailed = true;
+    console.error(`[chrome-launcher] spawn failed: ${e.message}`);
   });
+  child.unref();
 
-  const startTime = Date.now();
-  while (Date.now() - startTime < maxWaitMs) {
-    await new Promise(r => setTimeout(r, 500));
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (spawnFailed) return { up: false, launched: true };
+    await new Promise((r) => setTimeout(r, 500));
     if (await isCdpAvailable(protocol, host, port)) {
-      console.error('[chrome-launcher] Chrome started successfully');
-      return true;
+      console.error('[chrome-launcher] Chrome CDP ready');
+      return { up: true, launched: true };
     }
   }
-
-  console.error('[chrome-launcher] Chrome did not start within ' + maxWaitMs + 'ms');
-  return false;
+  console.error(`[chrome-launcher] Chrome did not serve CDP within ${maxWaitMs}ms`);
+  return { up: false, launched: true };
 }

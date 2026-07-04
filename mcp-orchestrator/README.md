@@ -12,18 +12,24 @@ npm ci
 
 ### 2. Start Chrome with debugging enabled
 
-Use a dedicated profile directory, kept outside the repo — it holds real browser credentials.
+Usually you can skip this step: the server **auto-launches** a debug Chrome on
+first connect (disable with `AUTO_LAUNCH_CHROME=0`). The profile lives at
+`~/.auto-browser/chrome-profile` — outside the repo, since it holds real
+browser credentials.
 
-macOS / Linux:
+Manual start, macOS / Linux:
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --remote-debugging-port=9222 --user-data-dir="$HOME/.auto-browser/chrome-profile"
+scripts/start-chrome-debug.sh
 ```
 
-Windows: run `start-chrome-debug.bat` (closes Chrome first, then relaunches `chrome.exe` with the same two flags).
+Manual start, Windows:
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="%USERPROFILE%\.auto-browser\chrome-profile"
+```
 
-### 3. Open tabs in Chrome
-Open these 3 tabs and log in:
+### 3. Log into the model sites
+On a cold start the server opens the three model tabs itself; log in once to
+each (sessions persist in the profile):
 - https://claude.ai
 - https://chatgpt.com
 - https://gemini.google.com
@@ -53,9 +59,10 @@ All optional; defaults in `config.js`.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools endpoint to attach to |
-| `STATE_FILE` | `mcp-orchestrator/consensus_state.json` | Where consensus state is persisted |
-| `CHROME_PATH` | Windows Chrome path | Chrome binary (used by the launcher utility; set on macOS/Linux) |
-| `CHROME_USER_DATA` | `mcp-orchestrator/.chrome-debug` | Debug profile dir (prefer a path outside the repo) |
+| `STATE_FILE` | `~/.auto-browser/consensus_state.json` | Where consensus state is persisted |
+| `CHROME_PATH` | platform default (macOS/Windows/Linux) | Chrome binary for auto-launch |
+| `CHROME_USER_DATA` | `~/.auto-browser/chrome-profile` | Debug profile dir (holds the site logins) |
+| `AUTO_LAUNCH_CHROME` | `1` | Set `0` to never auto-launch Chrome on connect |
 | `TIMEOUT_RESPONSE` | `120000` | Fallback max ms to wait for a model's response |
 | `TIMEOUT_RESPONSE_CLAUDE` | `300000` | Per-model response ceiling (extended-thinking models take minutes) |
 | `TIMEOUT_RESPONSE_CHATGPT` | `600000` | Per-model response ceiling |

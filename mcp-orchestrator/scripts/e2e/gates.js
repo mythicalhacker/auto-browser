@@ -11,10 +11,11 @@ import { randomBytes } from 'crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { homedir } from 'os';
 import { McpClient, STATE_DIR } from './mcp-client.js';
 import {
   ensureChrome, cdpReady, weSpawnedChrome, ensureModelTabs, openModelTabs,
-  reduceModelTabsTo, loginStatus, freshModelChats, MODEL_URLS,
+  reduceModelTabsTo, loginStatus, freshModelChats, adoptRunningChrome, MODEL_URLS,
 } from './chrome.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -458,6 +459,63 @@ export async function gateDoubleStart(log) {
   return details;
 }
 
+/** Live: cold start — NO Chrome running; the server must auto-launch it,
+ * auto-open the model tabs, and complete a round on intact logins (PR-3). */
+export async function gateColdStart(log) {
+  const details = [];
+  if (await cdpReady(1000)) {
+    return ['BLOCKED: a Chrome already serves :9222 — cold start needs a cold port'];
+  }
+
+  await pauseBetweenConsensusRuns(log);
+  const models = ['claude', 'chatgpt', 'gemini'];
+  charge(models, 1);
+
+  const profile = join(homedir(), '.auto-browser', 'chrome-profile');
+  const client = new McpClient({
+    testName: 'coldstart',
+    env: {
+      CHROME_USER_DATA: profile,
+      AUTO_LAUNCH_CHROME: '1',
+      ...responseTimeoutEnv('240000'),
+    },
+  });
+  try {
+    await client.initialize();
+    // Cold connect = Chrome launch (<=45s) + 3 tab loads (30s goto + 3s
+    // settle each) — far past the client's 30s default RPC timeout.
+    const conn = await client.callTool('connect_browser', {}, 240000);
+    assertInto(details, conn.isError !== true, 'connect_browser succeeded from a cold port');
+    const connText = conn.content?.[0]?.text || '';
+    const found = models.filter((m) => connText.includes(m));
+    assertInto(details, found.length === 3, `all 3 model tabs present after auto-launch (${connText.trim()})`);
+
+    // The RPC blocks for the whole round; ceiling is 240s per model.
+    const round = await client.callTool('send_single_round', {
+      prompt: 'What is 3+3? Answer with just the number.',
+    }, 300000);
+    assertInto(details, round.isError !== true, 'send_single_round succeeded');
+    const text = round.content?.[0]?.text || '';
+    const answered = models.filter((m) => {
+      const section = text.match(new RegExp(`=== ${m.toUpperCase()} ===\\n([\\s\\S]*?)(?=\\n=== |$)`));
+      return section && section[1].includes('6');
+    });
+    assertInto(details, answered.length >= 2, `>=2 models answered 6 — logins survived (got ${answered.length}: ${answered.join(',')})`);
+    assertInto(details, !text.includes('Error:'), 'no error text in round output');
+
+    // The server's Chrome is detached and would outlive the server as an
+    // unowned orphan — adopt it so cleanup and re-runs work.
+    const adopted = await adoptRunningChrome(profile);
+    details.push(adopted
+      ? 'PASS: auto-launched Chrome adopted as harness-owned (cleanup enabled)'
+      : 'WARN: could not adopt auto-launched Chrome — stop it manually before re-running');
+  } finally {
+    markConsensusEnd(); // messages may have been sent even on a thrown RPC
+    await client.close();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -469,6 +527,7 @@ export const GATES = {
   timeout: gateTimeout,
   corruptboot: gateCorruptBoot,
   doublestart: gateDoubleStart,
+  coldstart: gateColdStart,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

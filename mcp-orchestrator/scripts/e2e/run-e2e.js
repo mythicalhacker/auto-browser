@@ -14,6 +14,12 @@ mkdirSync(STATE_DIR, { recursive: true });
 if (!process.env.STATE_FILE) {
   process.env.STATE_FILE = join(STATE_DIR, 'orchestrator-default.json');
 }
+// Servers spawned by gates inherit this env: a Chrome dying mid-gate must be
+// a LOUD connect failure, never a silent relaunch from a fresh profile with
+// auto-opened tabs (only gateColdStart overrides this with '1').
+if (!process.env.AUTO_LAUNCH_CHROME) {
+  process.env.AUTO_LAUNCH_CHROME = '0';
+}
 
 const { GATES, startCaffeinate, ledgerSnapshot } = await import('./gates.js');
 

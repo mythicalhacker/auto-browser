@@ -1,5 +1,6 @@
 // tools/consensus.js — Consensus workflow, state persistence, and tool definitions
-import { writeFileSync, readFileSync, existsSync, renameSync } from "fs";
+import { writeFileSync, readFileSync, existsSync, renameSync, mkdirSync } from "fs";
+import { dirname } from "path";
 import { ConsensusBarrier } from "../utils/barrier.js";
 import { findFirst, findAll } from "../utils/selectors.js";
 import { CONFIG, SELECTORS } from "../config.js";
@@ -22,6 +23,8 @@ let consensusState = {
 let runActive = false;
 
 function saveState() {
+  // Default state path lives under ~/.auto-browser — ensure the dir exists.
+  mkdirSync(dirname(CONFIG.stateFile), { recursive: true });
   // Temp-file + rename: a crash mid-write can never leave a truncated
   // consensus_state.json (rename is atomic for same-volume paths).
   const tmp = `${CONFIG.stateFile}.tmp`;

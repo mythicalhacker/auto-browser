@@ -1,13 +1,25 @@
-﻿// config.js — Centralized configuration for MCP Orchestrator
-import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// config.js — Centralized configuration for MCP Orchestrator
+import { join } from 'path';
+import { homedir } from 'os';
+
+// Runtime artifacts (the debug profile with live logins, consensus state)
+// live OUTSIDE the repo by default.
+const AUTO_BROWSER_HOME = join(homedir(), '.auto-browser');
+
+function defaultChromePath() {
+  switch (process.platform) {
+    case 'darwin': return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    case 'win32': return 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    default: return '/usr/bin/google-chrome';
+  }
+}
 
 export const CONFIG = Object.freeze({
   cdpUrl: process.env.CDP_URL || 'http://localhost:9222',
-  stateFile: process.env.STATE_FILE || resolve(__dirname, 'consensus_state.json'),
-  chromePath: process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  chromeUserData: process.env.CHROME_USER_DATA || resolve(__dirname, '.chrome-debug'),
+  stateFile: process.env.STATE_FILE || join(AUTO_BROWSER_HOME, 'consensus_state.json'),
+  chromePath: process.env.CHROME_PATH || defaultChromePath(),
+  chromeUserData: process.env.CHROME_USER_DATA || join(AUTO_BROWSER_HOME, 'chrome-profile'),
+  autoLaunchChrome: process.env.AUTO_LAUNCH_CHROME !== '0',
   timeouts: Object.freeze({
     response: Number(process.env.TIMEOUT_RESPONSE) || 120000,
     // Per-model response ceilings: extended-thinking models (GPT 5.5 Pro et
@@ -31,6 +43,13 @@ export const PATTERNS = Object.freeze({
   claude: 'claude.ai',
   chatgpt: 'chatgpt.com',
   gemini: 'gemini.google.com',
+});
+
+// Entry URLs used when the auto-launched Chrome is missing a model tab.
+export const ENTRY_URLS = Object.freeze({
+  claude: 'https://claude.ai',
+  chatgpt: 'https://chatgpt.com',
+  gemini: 'https://gemini.google.com',
 });
 
 export const SELECTORS = Object.freeze({
