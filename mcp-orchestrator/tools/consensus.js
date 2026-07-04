@@ -126,6 +126,13 @@ async function clearComposer(page, sel) {
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
 }
 
+// Above this size, insert in chunks: a single giant insertText can drop text
+// or hang a rich editor. Synthesis embeds full deep-research reports (tens of
+// thousands of chars), so large inserts are a normal path, not an edge case.
+// Floor to 1000 so a bad/negative env value can never make the slice loop
+// spin forever on empty slices.
+const INSERT_CHUNK_CHARS = Math.max(1000, Number(process.env.INSERT_CHUNK_CHARS) || 15000);
+
 async function insertPrompt(page, model, sel, prompt) {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
@@ -136,8 +143,23 @@ async function insertPrompt(page, model, sel, prompt) {
   // insertText avoids the OS clipboard: parallel sends can't cross-paste each
   // other's prompts, background tabs don't need document focus, and there is
   // no platform-specific paste shortcut. Unlike page.type, embedded newlines
-  // are inserted as text rather than triggering submit.
-  await page.keyboard.insertText(prompt);
+  // are inserted as text rather than triggering submit. Large payloads are
+  // chunked so no single event overwhelms the composer (the receipt phase
+  // still verifies the whole prompt's tail landed).
+  if (prompt.length <= INSERT_CHUNK_CHARS) {
+    await page.keyboard.insertText(prompt);
+  } else {
+    for (let i = 0; i < prompt.length;) {
+      let end = Math.min(i + INSERT_CHUNK_CHARS, prompt.length);
+      // Never cut between a surrogate pair (astral chars, emoji): extend the
+      // chunk by the low surrogate so insertText receives whole code points.
+      const code = prompt.charCodeAt(end - 1);
+      if (end < prompt.length && code >= 0xd800 && code <= 0xdbff) end += 1;
+      await page.keyboard.insertText(prompt.slice(i, end));
+      await page.waitForTimeout(30);
+      i = end;
+    }
+  }
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
 }
 

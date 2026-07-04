@@ -129,6 +129,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Research Synthesis",
+    file: "unit/test-research-synthesis.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Dead-Module Wiring",
     file: "unit/test-dead-module-wiring.js",
     critical: false,

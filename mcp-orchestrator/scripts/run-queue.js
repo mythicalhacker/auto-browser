@@ -10,7 +10,8 @@
 // Exit codes: 0 drained · 2 lock held · 4 login needed (which site printed)
 import { acquireDrainLock, releaseDrainLock } from '../research/lockfile.js';
 import { drainQueue } from '../research/runner.js';
-import { statusTable, listTasks } from '../research/research-queue.js';
+import { statusTable, listTasks, getTask } from '../research/research-queue.js';
+import { synthesizeTask } from '../research/synthesis.js';
 import { quotaSnapshot } from '../research/quota-ledger.js';
 import { providerNames } from '../models/registry.js';
 import { browserService } from '../services/browser-service.js';
@@ -67,6 +68,35 @@ const pendingWork = () => listTasks({ batch }).some((t) =>
   Object.values(t.perProvider).some((pp) => ['queued', 'awaiting_quota', 'running'].includes(pp.status)));
 
 try {
+  if (has('synthesize')) {
+    // Synthesize every in-scope task with >=2 complete reports, skipping any
+    // whose FINAL already exists (unless --force) — a paid re-synthesis of an
+    // already-final task is wasteful.
+    await browserService.connect();
+    const { existsSync } = await import('fs');
+    const { finalPath } = await import('../research/synthesis.js');
+    const force = has('force');
+    const tasks = listTasks({ batch }).filter((t) => {
+      const enough = Object.values(t.perProvider).filter((pp) => pp.status === 'complete').length >= 2;
+      if (!enough) return false;
+      if (!force && existsSync(finalPath(t))) {
+        log(`skip ${t.id}: FINAL already exists (use --force to redo)`);
+        return false;
+      }
+      return true;
+    });
+    log(`synthesizing ${tasks.length} task(s) with >=2 reports`);
+    const results = [];
+    for (const t of tasks) {
+      const res = await synthesizeTask(browserService, t.id, { log });
+      log(`synthesize ${t.id}: ${res.status}${res.finalPath ? ` → ${res.finalPath}` : ` (${res.reason})`}`);
+      results.push({ task: t.id, ...res });
+    }
+    console.log(JSON.stringify({ synthesized: results }, null, 2));
+    cleanup();
+    process.exit(0);
+  }
+
   for (;;) {
     const summary = await drainQueue(browserService, { providers, batch, log });
     log(`drain pass: ${JSON.stringify(summary)}`);

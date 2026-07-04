@@ -8,6 +8,7 @@ import { getConsensusToolDefinitions, handleConsensusToolCall, CONSENSUS_TOOL_NA
 import { getBrowserToolDefinitions, handleBrowserToolCall, BROWSER_TOOL_NAMES } from './tools/browser.js';
 import { getTaskToolDefinitions, handleTaskToolCall, TASK_TOOL_NAMES } from './tools/task-queue.js';
 import { getDispatchToolDefinitions, handleDispatchToolCall, DISPATCH_TOOL_NAMES } from './services/dispatcher.js';
+import { getResearchToolDefinitions, handleResearchToolCall, RESEARCH_TOOL_NAMES } from './tools/research.js';
 
 // Single source of truth for the version — package.json.
 const { version } = createRequire(import.meta.url)("./package.json");
@@ -19,7 +20,7 @@ const server = new Server(
 
 // Combined tool listing
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [...getConsensusToolDefinitions(), ...getBrowserToolDefinitions(), ...getTaskToolDefinitions(), ...getDispatchToolDefinitions()]
+  tools: [...getConsensusToolDefinitions(), ...getBrowserToolDefinitions(), ...getTaskToolDefinitions(), ...getDispatchToolDefinitions(), ...getResearchToolDefinitions()]
 }));
 
 // Combined tool dispatch
@@ -38,6 +39,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     if (DISPATCH_TOOL_NAMES.has(name)) {
       return await handleDispatchToolCall(name, args, browserService);
+    }
+    if (RESEARCH_TOOL_NAMES.has(name)) {
+      return await handleResearchToolCall(name, args, browserService);
     }
     throw new Error(`Unknown tool: ${name}`);
   } catch (e) {

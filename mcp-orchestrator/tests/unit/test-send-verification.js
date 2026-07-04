@@ -51,6 +51,7 @@ function makeSendMock(behavior, { answer = 'mock answer', model = 'claude', pill
   let composer = '';
   let submits = 0;
   let inserts = 0;
+  let totalInserted = '';
   let registered = false;
   let pillPresent = pill;
   const presses = [];
@@ -94,7 +95,7 @@ function makeSendMock(behavior, { answer = 'mock answer', model = 'claude', pill
         inserts++;
         const lands = behavior !== 'insert-never'
           && !(behavior === 'insert-misses-once' && inserts === 1);
-        if (lands) composer += t;
+        if (lands) { composer += t; totalInserted += t; }
       },
     },
     waitForTimeout: async () => {},
@@ -107,6 +108,7 @@ function makeSendMock(behavior, { answer = 'mock answer', model = 'claude', pill
       get submits() { return submits; },
       get inserts() { return inserts; },
       get composer() { return composer; },
+      get totalInserted() { return totalInserted; },
       get pillPresent() { return pillPresent; },
     },
   };
@@ -194,6 +196,22 @@ console.log('\nambiguous composer state (input vanishes after insert):');
     'unreadable composer fails WITHOUT submit or retry');
   assert(m.spy.inserts === 1 && m.spy.submits === 0,
     'no re-insert and no submit when a double-send cannot be ruled out');
+}
+
+console.log('\nlarge chunked insert (synthesis payloads):');
+{
+  // A payload well past INSERT_CHUNK_CHARS, containing astral chars (emoji =
+  // surrogate pairs) right at likely chunk boundaries, must land intact and
+  // pass receipt. INSERT_CHUNK_CHARS default 15000.
+  const big = '📚'.repeat(9000) + '\n\nTAIL_SENTINEL_END'; // 18000 code units of surrogate pairs + tail
+  const m = makeSendMock('clears');
+  const ok = await sendToModel(bs(m), 'claude', big);
+  assert(ok === true, 'large multi-chunk insert verifies and sends');
+  assert(m.spy.inserts > 1, 'payload was chunked (multiple insertText calls)');
+  // The mock composer accumulated every chunk; reconstruct and compare.
+  assert(m.spy.totalInserted === big, 'reassembled chunks equal the original (no dropped/split surrogate chars)');
+  assert(!/�/.test(m.spy.totalInserted) && (m.spy.totalInserted.match(/📚/g) || []).length === 9000,
+    'all 9000 emoji survived — no surrogate pair was split at a chunk boundary');
 }
 
 console.log('\nround-level quarantine:');
