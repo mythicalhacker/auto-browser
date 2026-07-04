@@ -79,7 +79,7 @@ All optional; defaults in `config.js`.
 | Tool | Description |
 |------|-------------|
 | `connect_browser` | Connect to Chrome on CDP port 9222 |
-| `health_check` | Verify Chrome connection, tabs, and login state |
+| `health_check` | Chrome connection, tabs, login state, per-platform send counts, and persisted response-latency stats (p50/p95/max/timeouts per model) |
 | `send_single_round` | Send prompt to all 3 models and wait for responses (single round) |
 | `start_consensus` | Start autonomous consensus workflow (iterates until agreement; `max_rounds` 2–10, default 5; optional `response_timeout_ms` per-call ceiling for deep-research prompts) |
 | `get_consensus_status` | Check current consensus workflow status and progress |
@@ -130,7 +130,7 @@ The consensus workflow cross-pollinates responses: each model receives the OTHER
 ## Troubleshooting
 
 **"Failed to connect to Chrome"**
-- Make sure Chrome is started with `--remote-debugging-port=9222`
+- The server normally auto-launches Chrome; if that's disabled (`AUTO_LAUNCH_CHROME=0`), start it with `--remote-debugging-port=9222`
 - Use a separate `--user-data-dir` from your default profile
 - Close other Chrome instances first
 
@@ -151,10 +151,11 @@ npm test                        # Chrome-free unit suite (what CI runs)
 npm run test:integration        # Chrome-bound integration tests
 node tests/run-all.js --quick   # unit + integration (skips the e2e consensus test)
 node tests/run-all.js           # full suite — requires Chrome with fresh chat tabs
-node scripts/e2e/run-e2e.js --gates=handshake,validation   # MCP-protocol e2e (Chrome-free)
+node scripts/e2e/run-e2e.js --gates=handshake,validation,corruptboot   # MCP-protocol e2e (Chrome-free)
 ```
 
-Live e2e gates (race/agreeable/timeout — require ≥ 2 logged-in models):
+Live e2e gates (require ≥ 2 logged-in models; 30-messages/site budget ledger built in):
 ```bash
-node scripts/e2e/run-e2e.js --gates=logins,race,agreeable,verdictstrip,timeout --live
+node scripts/e2e/run-e2e.js --gates=logins,race,agreeable,verdictstrip,timeout,doublestart,compression --live
+node scripts/e2e/run-e2e.js --gates=coldstart --live   # needs NO Chrome on :9222
 ```
