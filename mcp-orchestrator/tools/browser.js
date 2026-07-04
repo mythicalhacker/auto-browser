@@ -98,7 +98,7 @@ const BROWSER_TOOLS = [
   },
   {
     name: "browser_type",
-    description: "Type text into a focused element or a specified selector using clipboard paste. Optionally submit with Enter.",
+    description: "Type text into a focused element or a specified selector via a single text-insertion event (no OS clipboard involved). Optionally submit with Enter.",
     inputSchema: {
       type: "object",
       properties: {
@@ -397,12 +397,12 @@ export async function handleBrowserToolCall(name, args, browserService) {
         await page.click(args.selector, { timeout: CONFIG.timeouts.action });
         await page.waitForTimeout(CONFIG.timeouts.microDelay);
       }
-      // Use clipboard paste (not page.type) for performance
-      await page.evaluate(async (text) => {
-        await navigator.clipboard.writeText(text);
-      }, args.text);
-      await page.keyboard.press("Control+v");
+      // insertText matches clipboard-paste speed but avoids the shared OS
+      // clipboard and platform-specific paste shortcuts.
+      await page.keyboard.insertText(args.text);
       if (args.submit) {
+        // Give the UI framework a tick to process the input event before
+        // Enter, so a not-yet-registered composer doesn't submit empty.
         await page.waitForTimeout(CONFIG.timeouts.microDelay);
         await page.keyboard.press("Enter");
       }

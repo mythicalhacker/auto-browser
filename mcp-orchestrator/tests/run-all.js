@@ -66,6 +66,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Consensus Verdict",
+    file: "unit/test-consensus-verdict.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Chrome Connection",
     file: "integration/test-chrome.js",
     critical: true,

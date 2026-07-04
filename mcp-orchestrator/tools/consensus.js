@@ -41,10 +41,14 @@ export async function sendToModel(browserService, model, prompt) {
   await inputMatch.element.click({ force: true });
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
 
-  await page.evaluate(async (text) => {
-    await navigator.clipboard.writeText(text);
-  }, prompt);
-  await page.keyboard.press("Control+v");
+  // insertText avoids the OS clipboard: parallel sends can't cross-paste each
+  // other's prompts, background tabs don't need document focus, and there is
+  // no platform-specific paste shortcut. Unlike page.type, embedded newlines
+  // are inserted as text rather than triggering submit.
+  await page.keyboard.insertText(prompt);
+  // Give the UI framework a tick to process the input event and enable the
+  // send button — the submit selectors don't exclude disabled buttons and
+  // click({force}) on a disabled button is a silent no-op.
   await page.waitForTimeout(CONFIG.timeouts.microDelay);
 
   const submitMatch = await findFirst(page, sel.submit);
@@ -167,15 +171,18 @@ export async function runConsensusRound(browserService, prompts, roundNum) {
   return roundData;
 }
 
-function generateConsensusPrompt(originalPrompt, rounds, excludeModel = null) {
+export function generateConsensusPrompt(originalPrompt, rounds, excludeModel = null) {
   const lastRound = rounds[rounds.length - 1];
 
   // Filter out the excluded model's response (cross-pollination)
   const otherModels = Object.entries(lastRound.outputs)
     .filter(([model]) => model !== excludeModel && lastRound.outputs[model]);
 
+  // Strip peers' verdict lines before embedding: otherwise round-3+ prompts
+  // carry parseable "VERDICT: X" lines that a quoting model could feed back
+  // into parseVerdict as a spurious vote.
   const responsesText = otherModels.map(([model, output]) =>
-    `=== ${model.toUpperCase()} ===\n${output || "No response"}`
+    `=== ${model.toUpperCase()} ===\n${stripVerdictLines(output) || "No response"}`
   ).join('\n\n');
 
   const modelCount = otherModels.length;
@@ -196,21 +203,47 @@ YOUR TASK:
 2. Identify where they DISAGREE or have different approaches
 3. Synthesize the BEST elements from each response
 4. Provide your IMPROVED version that incorporates the strongest points
-
-If you believe consensus has been reached (all making similar recommendations), state "CONSENSUS REACHED" and provide the final synthesized output.
+5. Finish with your verdict as the last line of your response, on its own line,
+   formatted exactly as "VERDICT: X" — where X is the single word AGREE if the
+   responses above all make substantially the same recommendation as yours, or
+   the single word DISAGREE if meaningful differences remain.
 
 Provide your response now:`;
 
   return prompt;
 }
 
-function checkConsensusReached(outputs) {
-  for (const [model, output] of Object.entries(outputs)) {
-    if (output && output.toUpperCase().includes("CONSENSUS REACHED")) {
-      return true;
-    }
+// A verdict only counts on its own line: instruction echoes ("VERDICT: X"),
+// prose mentions, and barrier error strings can never match. AGREE must be a
+// bare line — a hedged AGREE ("AGREE if...") is an abstention. DISAGREE
+// tolerates a trailing clause ("DISAGREE — differences remain") because
+// dropping a hedged dissent could flip a round into false consensus.
+const AGREE_RE = /^\s*[*_`"']*VERDICT\s*:\s*[*_`"']*AGREE[*_`"'.!\s]*$/i;
+const DISAGREE_RE = /^\s*[*_`"']*VERDICT\s*:\s*[*_`"']*DISAGREE\b/i;
+
+export function parseVerdict(output) {
+  if (typeof output !== "string") return null;
+  let verdict = null;
+  for (const line of output.split("\n")) {
+    if (AGREE_RE.test(line)) verdict = "AGREE"; // last verdict line wins
+    else if (DISAGREE_RE.test(line)) verdict = "DISAGREE";
   }
-  return false;
+  return verdict;
+}
+
+export function stripVerdictLines(output) {
+  if (typeof output !== "string") return output;
+  return output
+    .split("\n")
+    .filter(line => !AGREE_RE.test(line) && !DISAGREE_RE.test(line))
+    .join("\n")
+    .trim();
+}
+
+export function checkConsensusReached(outputs) {
+  // Models that failed or omitted a verdict don't vote.
+  const votes = Object.values(outputs || {}).map(parseVerdict).filter(Boolean);
+  return votes.length >= 2 && votes.every(v => v === "AGREE");
 }
 
 async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
@@ -227,6 +260,16 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
 
   await browserService.connect();
 
+  // Consensus needs at least 2 voters; with fewer, checkConsensusReached can
+  // never pass and every round would be wasted against an unwinnable setup.
+  const initialModels = browserService.getActiveModels();
+  if (initialModels.length < 2) {
+    consensusState.status = `insufficient_models: found ${initialModels.length} model tab(s), need at least 2`;
+    consensusState.active = false;
+    saveState();
+    return consensusState;
+  }
+
   // Round 1: Send original prompt
   consensusState.status = "round_1_sending";
   saveState();
@@ -238,14 +281,6 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
 
   // Subsequent rounds - with cross-pollination (each model sees OTHER models' responses)
   for (let i = 2; i <= maxRounds; i++) {
-    // Check if consensus reached
-    if (checkConsensusReached(consensusState.rounds[consensusState.rounds.length - 1].outputs)) {
-      consensusState.status = "consensus_reached";
-      consensusState.finalConsensus = consensusState.rounds[consensusState.rounds.length - 1].outputs;
-      saveState();
-      break;
-    }
-
     consensusState.status = `round_${i}_sending`;
     saveState();
 
@@ -260,7 +295,17 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5) {
     const roundData = await runConsensusRound(browserService, roundPrompts, i);
     consensusState.rounds.push(roundData);
     consensusState.currentRound = i;
+
+    // Check the round that was just asked for verdicts — round 1 carries no
+    // verdict instruction, and checking after the send counts the final
+    // round's votes too.
+    const reached = checkConsensusReached(roundData.outputs);
+    if (reached) {
+      consensusState.status = "consensus_reached";
+      consensusState.finalConsensus = roundData.outputs;
+    }
     saveState();
+    if (reached) break;
   }
 
   if (consensusState.status !== "consensus_reached") {
@@ -328,7 +373,7 @@ const CONSENSUS_TOOLS = [
       type: "object",
       properties: {
         prompt: { type: "string", description: "The task/prompt to reach consensus on" },
-        max_rounds: { type: "number", default: 5, description: "Maximum iteration rounds" }
+        max_rounds: { type: "integer", default: 5, minimum: 2, maximum: 10, description: "Maximum iteration rounds (2-10)" }
       },
       required: ["prompt"]
     }
@@ -375,6 +420,13 @@ export function getConsensusToolDefinitions() {
   return CONSENSUS_TOOLS;
 }
 
+// The MCP SDK does not enforce inputSchema — validate args before use.
+function requirePrompt(args, toolName) {
+  if (typeof args?.prompt !== "string" || !args.prompt.trim()) {
+    throw new Error(`${toolName} requires a non-empty 'prompt' string`);
+  }
+}
+
 export async function handleConsensusToolCall(name, args, browserService) {
   if (!CONSENSUS_TOOL_NAMES.has(name)) return null;
 
@@ -384,15 +436,25 @@ export async function handleConsensusToolCall(name, args, browserService) {
       const found = browserService.getActiveModels();
       return { content: [{ type: "text", text: `Connected. Found: ${found.join(", ")}` }] };
 
-    case "start_consensus":
+    case "start_consensus": {
+      requirePrompt(args, "start_consensus");
+      // Number() coercion keeps numeric strings working — MCP clients often
+      // emit numbers as strings. Minimum is 2: a 1-round run can't iterate
+      // and never evaluates consensus (that's send_single_round).
+      const maxRounds = args.max_rounds == null ? 5 : Number(args.max_rounds);
+      if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 10) {
+        throw new Error("'max_rounds' must be an integer between 2 and 10");
+      }
+
       // CRITICAL: fire-and-forget — do NOT await runFullConsensus.
       // .catch() uses module-scoped consensusState and saveState.
-      runFullConsensus(browserService, args.prompt, args.max_rounds || 5).catch(e => {
+      runFullConsensus(browserService, args.prompt, maxRounds).catch(e => {
         consensusState.status = `error: ${e.message}`;
         saveState();
       });
 
-      return { content: [{ type: "text", text: `Consensus workflow started.\nPrompt: ${args.prompt.substring(0, 100)}...\nMax rounds: ${args.max_rounds || 5}\n\nUse get_consensus_status to check progress.` }] };
+      return { content: [{ type: "text", text: `Consensus workflow started.\nPrompt: ${args.prompt.substring(0, 100)}...\nMax rounds: ${maxRounds}\n\nUse get_consensus_status to check progress.` }] };
+    }
 
     case "get_consensus_status":
       return { content: [{ type: "text", text: getStatusSummary() }] };
@@ -412,7 +474,8 @@ export async function handleConsensusToolCall(name, args, browserService) {
       }
       return { content: [{ type: "text", text: output }] };
 
-    case "send_single_round":
+    case "send_single_round": {
+      requirePrompt(args, "send_single_round");
       await browserService.connect();
       const round = await runConsensusRound(browserService, args.prompt, 1);
       let result = `Round complete (${(round.duration/1000).toFixed(1)}s)\n\n`;
@@ -420,6 +483,7 @@ export async function handleConsensusToolCall(name, args, browserService) {
         result += `=== ${m.toUpperCase()} ===\n${o}\n\n`;
       }
       return { content: [{ type: "text", text: result }] };
+    }
 
     case "health_check": {
       const report = await getHealthReport(browserService);

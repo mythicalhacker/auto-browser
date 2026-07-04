@@ -36,7 +36,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     throw new Error(`Unknown tool: ${name}`);
   } catch (e) {
-    return { content: [{ type: "text", text: `Error: ${e.message}` }] };
+    return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
   }
 });
 
