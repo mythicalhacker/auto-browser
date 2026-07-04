@@ -80,6 +80,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "State Guard",
+    file: "unit/test-state-guard.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Chrome Connection",
     file: "integration/test-chrome.js",
     critical: true,

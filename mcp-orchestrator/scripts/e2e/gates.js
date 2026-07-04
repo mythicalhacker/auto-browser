@@ -8,7 +8,7 @@
 //    (token equality, regex, JSON fields) — response text is never interpreted.
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { McpClient, STATE_DIR } from './mcp-client.js';
@@ -394,6 +394,70 @@ export async function gateTimeout(log) {
   }
 }
 
+/** Chrome-free: a truncated state file must not break server boot (PR-4). */
+export async function gateCorruptBoot(log) {
+  const details = [];
+  const stateFile = join(STATE_DIR, 'corruptboot.json');
+  const corruptName = (f) => f.startsWith('corruptboot.json.corrupt-');
+  // Stale artifacts from earlier runs must not satisfy this gate — require a
+  // NEW quarantine file from THIS boot.
+  const before = new Set(readdirSync(STATE_DIR).filter(corruptName));
+  writeFileSync(stateFile, '{"active": true, "status": "runni');
+  const client = new McpClient({ testName: 'corruptboot' });
+  try {
+    await client.initialize();
+    const tools = await client.listTools();
+    assertInto(details, tools.length >= 25, `server boots and lists tools despite corrupt state (${tools.length} tools)`);
+    const status = await client.callTool('get_consensus_status', {});
+    assertInto(details, status.isError !== true, 'get_consensus_status readable after quarantine');
+    const fresh = readdirSync(STATE_DIR).filter(corruptName).filter((f) => !before.has(f));
+    assertInto(details, fresh.length >= 1, `a NEW quarantine file appeared this boot (${fresh.join(',') || 'none'})`);
+    assertInto(details, !existsSync(stateFile), 'corrupt original renamed away');
+  } finally {
+    await client.close();
+  }
+  return details;
+}
+
+/** Live: single-flight — a second start_consensus while one runs must isError (PR-4). */
+export async function gateDoubleStart(log) {
+  const details = [];
+  const usable = usableModels();
+  if (!usable || usable.length < 2) return ['BLOCKED: needs gateLogins with >=2 usable models first'];
+
+  await pauseBetweenConsensusRuns(log);
+  log('opening fresh chats in all model tabs (stale-DOM guard)');
+  await freshModelChats();
+  const MAX_ROUNDS = 2;
+  const openNow = Object.keys(await openModelTabs());
+  charge(openNow, MAX_ROUNDS);
+
+  const client = new McpClient({ testName: 'doublestart', env: responseTimeoutEnv('240000') });
+  try {
+    await client.initialize();
+    const first = await client.callTool('start_consensus', {
+      prompt: 'What is 5+5? Answer with just the number.',
+      max_rounds: MAX_ROUNDS,
+    });
+    assertInto(details, first.isError !== true, 'first start_consensus accepted');
+    const second = await client.callTool('start_consensus', {
+      prompt: 'What is 6+6? Answer with just the number.',
+      max_rounds: MAX_ROUNDS,
+    });
+    assertInto(details, second.isError === true, 'second start_consensus while active returns isError (single-flight)');
+    const status = await pollStatus(client, { timeoutMs: 900000 });
+    markConsensusEnd();
+    assertInto(details, /consensus_reached|max_rounds_reached/.test(status), `first run completed normally (${status.split('\n')[0]})`);
+    const state = readStateFile(client);
+    refund(openNow, MAX_ROUNDS - (state.rounds?.length || MAX_ROUNDS));
+    assertInto(details, state.originalPrompt?.includes('5+5'), 'persisted state belongs to the FIRST run (second never started)');
+    assertInto(details, state.active === false, 'active flag reset');
+  } finally {
+    await client.close();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -403,6 +467,8 @@ export const GATES = {
   agreeable: gateAgreeable,
   verdictstrip: gateVerdictStrip,
   timeout: gateTimeout,
+  corruptboot: gateCorruptBoot,
+  doublestart: gateDoubleStart,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

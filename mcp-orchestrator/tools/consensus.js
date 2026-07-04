@@ -1,5 +1,5 @@
 // tools/consensus.js — Consensus workflow, state persistence, and tool definitions
-import { writeFileSync, readFileSync, existsSync } from "fs";
+import { writeFileSync, readFileSync, existsSync, renameSync } from "fs";
 import { ConsensusBarrier } from "../utils/barrier.js";
 import { findFirst, findAll } from "../utils/selectors.js";
 import { CONFIG, SELECTORS } from "../config.js";
@@ -16,13 +16,34 @@ let consensusState = {
   status: "idle"
 };
 
+// In-process marker for the currently running workflow. Authoritative while
+// this process lives: gates single-flight and blocks loadState's object
+// identity swap mid-run (status reads must see the live run, not the disk).
+let runActive = false;
+
 function saveState() {
-  writeFileSync(CONFIG.stateFile, JSON.stringify(consensusState, null, 2));
+  // Temp-file + rename: a crash mid-write can never leave a truncated
+  // consensus_state.json (rename is atomic for same-volume paths).
+  const tmp = `${CONFIG.stateFile}.tmp`;
+  writeFileSync(tmp, JSON.stringify(consensusState, null, 2));
+  renameSync(tmp, CONFIG.stateFile);
 }
 
 function loadState() {
-  if (existsSync(CONFIG.stateFile)) {
+  if (runActive) return; // the in-memory run is the truth — never swap it out
+  if (!existsSync(CONFIG.stateFile)) return;
+  try {
     consensusState = JSON.parse(readFileSync(CONFIG.stateFile, 'utf8'));
+  } catch (e) {
+    // Corrupt state (crash mid-write predating atomic saves, manual edits):
+    // quarantine it and start fresh rather than crashing every boot.
+    const quarantine = `${CONFIG.stateFile}.corrupt-${Date.now()}`;
+    try {
+      renameSync(CONFIG.stateFile, quarantine);
+      console.error(`[state] corrupt state file quarantined to ${quarantine}: ${e.message}`);
+    } catch (renameErr) {
+      console.error(`[state] corrupt state file could not be quarantined: ${renameErr.message}`);
+    }
   }
 }
 
@@ -515,12 +536,28 @@ export async function handleConsensusToolCall(name, args, browserService) {
       }
       const responseTimeoutMs = parseResponseTimeoutMs(args);
 
+      // Single-flight: two concurrent runs would interleave sends into the
+      // same tabs and fight over module-scoped state.
+      if (runActive) {
+        throw new Error("a consensus workflow is already active — wait for it or check get_consensus_status");
+      }
+      runActive = true;
+
       // CRITICAL: fire-and-forget — do NOT await runFullConsensus.
       // .catch() uses module-scoped consensusState and saveState.
-      runFullConsensus(browserService, args.prompt, maxRounds, responseTimeoutMs).catch(e => {
-        consensusState.status = `error: ${e.message}`;
-        saveState();
-      });
+      runFullConsensus(browserService, args.prompt, maxRounds, responseTimeoutMs)
+        .catch(e => {
+          consensusState.status = `error: ${e.message}`;
+          consensusState.active = false;
+          // Best-effort: if persistence itself is what failed, a rethrow here
+          // becomes an unhandled rejection that kills the whole server.
+          try {
+            saveState();
+          } catch (persistErr) {
+            console.error(`[state] could not persist error status: ${persistErr.message}`);
+          }
+        })
+        .finally(() => { runActive = false; });
 
       return { content: [{ type: "text", text: `Consensus workflow started.\nPrompt: ${args.prompt.substring(0, 100)}...\nMax rounds: ${maxRounds}\n\nUse get_consensus_status to check progress.` }] };
     }
@@ -574,4 +611,15 @@ export async function handleConsensusToolCall(name, args, browserService) {
 
 export function initConsensusState() {
   loadState();
+  // A persisted active:true means a previous process died mid-run — this
+  // process is not running that workflow, so surface it as interrupted.
+  if (consensusState.active) {
+    consensusState.active = false;
+    consensusState.status = "interrupted";
+    try {
+      saveState(); // best-effort: boot must survive an unwritable state path
+    } catch (e) {
+      console.error(`[state] could not persist interrupted recovery: ${e.message}`);
+    }
+  }
 }
