@@ -516,6 +516,72 @@ export async function gateColdStart(log) {
   return details;
 }
 
+/** Live: 3-round consensus with oversized answers — cross-pollination must
+ * compress peer text while mechanics stay correct; health_check must surface
+ * the new observability (PR-5). */
+export async function gateCompression(log) {
+  const details = [];
+  const usable = usableModels();
+  if (!usable || usable.length < 2) return ['BLOCKED: needs gateLogins with >=2 usable models first'];
+
+  await pauseBetweenConsensusRuns(log);
+  log('opening fresh chats in all model tabs (stale-DOM guard)');
+  await freshModelChats();
+  const MAX_ROUNDS = 3;
+  const openNow = Object.keys(await openModelTabs());
+  charge(openNow, MAX_ROUNDS);
+
+  const client = new McpClient({ testName: 'compression', env: responseTimeoutEnv('240000') });
+  try {
+    await client.initialize();
+    const res = await client.callTool('start_consensus', {
+      prompt: 'Write a thorough essay of at least 800 words arguing for either tabs or spaces for code indentation — pick exactly one side. This doubles as a length test: do NOT summarize or shorten; produce the full essay.',
+      max_rounds: MAX_ROUNDS,
+    });
+    assertInto(details, res.isError !== true, 'start_consensus accepted');
+    const status = await pollStatus(client, { timeoutMs: 1200000 });
+    assertInto(details, /consensus_reached|max_rounds_reached/.test(status), `terminal status sane (${status.split('\n')[0]})`);
+
+    const state = readStateFile(client);
+    refund(openNow, MAX_ROUNDS - (state.rounds?.length || MAX_ROUNDS));
+    assertInto(details, (state.rounds?.length || 0) >= 2, `>=2 rounds ran (${state.rounds?.length})`);
+
+    // Compression evidence: regenerate next-round prompts from the REAL
+    // persisted round-1 outputs with the same exported function the server
+    // used, and show the length delta.
+    const { generateConsensusPrompt, parseVerdict } = await import('../../tools/consensus.js');
+    const r1 = state.rounds[0];
+    let compressedSeen = false;
+    for (const model of Object.keys(r1.outputs || {})) {
+      const peers = Object.keys(r1.outputs).filter((m) => m !== model);
+      const rawPeerChars = peers.reduce((n, m) => n + (r1.outputs[m]?.length || 0), 0);
+      if (rawPeerChars <= peers.length * 2000) continue;
+      compressedSeen = true;
+      const p = generateConsensusPrompt(state.originalPrompt, [r1], model);
+      assertInto(details, p.includes('condensed'), `${model}: oversized peers carry the condensed marker`);
+      assertInto(details, p.length < rawPeerChars, `${model}: prompt ${p.length} chars < raw peer text ${rawPeerChars} chars`);
+      assertInto(details, parseVerdict(p) === null, `${model}: compressed prompt not verdict-parseable`);
+    }
+    if (!compressedSeen) {
+      // Not a product failure — the live models answered short. BLOCK (not
+      // FAIL) so a rerun with a longer prompt is the documented next step.
+      const lens = Object.entries(r1.outputs || {}).map(([m, o]) => `${m}=${o?.length || 0}ch`).join(' ');
+      details.push(`SKIP: live answers too short to exercise compression (${lens}) — rerun`);
+    }
+    assertInto(details, state.active === false, 'active flag reset');
+
+    const health = await client.callTool('health_check', {});
+    const htext = health.content?.[0]?.text || '';
+    assertInto(details, htext.includes('Rate limits'), 'health_check surfaces rate-limit usage');
+    assertInto(details, /: [1-9]\d*\//.test(htext), 'health_check shows nonzero send counts for this run');
+    assertInto(details, htext.includes('Response latency'), 'health_check surfaces persisted latency stats');
+  } finally {
+    markConsensusEnd();
+    await client.close();
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -528,6 +594,7 @@ export const GATES = {
   corruptboot: gateCorruptBoot,
   doublestart: gateDoubleStart,
   coldstart: gateColdStart,
+  compression: gateCompression,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

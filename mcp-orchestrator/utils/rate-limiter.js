@@ -1,7 +1,10 @@
 // utils/rate-limiter.js — Per-platform rate limit tracking
 const LIMITS = {
   claude: { maxPerWindow: 900, windowMs: 5 * 60 * 60 * 1000, name: '5 hours' },
-  chatgpt: { maxPerWindow: Infinity, windowMs: 0, name: 'unlimited' },
+  // Infinity limit = never warn/throttle, but keep a REAL tracking window so
+  // health_check can report actual send counts (windowMs 0 filtered every
+  // recorded timestamp away and permanently showed used=0).
+  chatgpt: { maxPerWindow: Infinity, windowMs: 24 * 60 * 60 * 1000, name: '24 hours' },
   gemini: { maxPerWindow: 100, windowMs: 24 * 60 * 60 * 1000, name: '24 hours' }
 };
 

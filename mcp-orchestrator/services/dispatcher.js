@@ -3,6 +3,7 @@ import { updateTask, areDependenciesMet, listTasks } from '../tools/task-queue.j
 import { sendToModel, waitForComplete, getOutput, runConsensusRound } from '../tools/consensus.js';
 import { SELECTORS } from '../config.js';
 import { findAll } from '../utils/selectors.js';
+import { checkLogin } from '../utils/login-check.js';
 
 const MODELS = ['claude', 'chatgpt', 'gemini'];
 
@@ -18,6 +19,13 @@ async function executeSingleModel(browserService, model, prompt) {
   await browserService.connect();
   const page = browserService.getPage(model);
   if (!page) throw new Error(`${model} tab not found — is Chrome open with ${model} logged in?`);
+
+  // Same fast-fail as consensus rounds: a tab parked on a login URL must not
+  // burn the full response ceiling. Selector misses stay inconclusive.
+  const { loggedIn, reason } = await checkLogin(page, model);
+  if (!loggedIn && reason.startsWith('URL contains login pattern')) {
+    throw new Error(`${model} login_expired: ${reason}`);
+  }
 
   const initialCount = (await findAll(page, SELECTORS[model].output)).length;
   await sendToModel(browserService, model, prompt);

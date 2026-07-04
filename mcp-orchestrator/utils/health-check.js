@@ -1,5 +1,7 @@
 // utils/health-check.js — System health diagnostics
 import { checkAllLogins } from './login-check.js';
+import { getAllUsageStats } from './rate-limiter.js';
+import { latencySummary } from './latency-stats.js';
 
 export async function getHealthReport(browserService) {
   const report = {
@@ -35,6 +37,11 @@ export async function getHealthReport(browserService) {
     report.chrome.error = e.message;
   }
 
+  // Observability (PR-5): per-platform send counts this session, and the
+  // persisted response-latency baselines that inform timeout ceilings.
+  report.rateLimits = getAllUsageStats();
+  report.latency = latencySummary();
+
   report.memoryFormatted = {
     heapUsed: `${Math.round(report.memory.heapUsed / 1024 / 1024)}MB`,
     heapTotal: `${Math.round(report.memory.heapTotal / 1024 / 1024)}MB`,
@@ -65,6 +72,18 @@ export function formatHealthReport(report) {
     text += `Login Status:\n`;
     for (const [model, status] of Object.entries(report.logins)) {
       text += `  ${model}: ${status.loggedIn ? 'OK' : 'FAIL'} ${status.reason}\n`;
+    }
+  }
+  text += `\nRate limits (sends this session):\n`;
+  for (const s of report.rateLimits || []) {
+    text += `  ${s.model}: ${s.used}/${s.limit === Infinity ? 'unlimited' : s.limit} per ${s.window}${s.warning ? ' — ' + s.warning : ''}\n`;
+  }
+  const latencies = Object.entries(report.latency || {});
+  if (latencies.length > 0) {
+    text += `\nResponse latency (persisted across runs):\n`;
+    for (const [model, s] of latencies) {
+      const pcts = s.count > 0 ? ` p50=${s.p50}ms p95=${s.p95}ms max=${s.max}ms` : '';
+      text += `  ${model}: n=${s.count}${pcts} timeouts=${s.timeouts}\n`;
     }
   }
   return text;

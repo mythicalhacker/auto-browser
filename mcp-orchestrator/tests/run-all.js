@@ -94,6 +94,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Dead-Module Wiring",
+    file: "unit/test-dead-module-wiring.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Chrome Connection",
     file: "integration/test-chrome.js",
     critical: true,

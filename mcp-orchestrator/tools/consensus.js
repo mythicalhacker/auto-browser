@@ -5,6 +5,10 @@ import { ConsensusBarrier } from "../utils/barrier.js";
 import { findFirst, findAll } from "../utils/selectors.js";
 import { CONFIG, SELECTORS } from "../config.js";
 import { getHealthReport, formatHealthReport } from "../utils/health-check.js";
+import { compressForCrossPollination } from "../utils/context-compression.js";
+import { checkLogin } from "../utils/login-check.js";
+import { recordUsage } from "../utils/rate-limiter.js";
+import { recordRound } from "../utils/latency-stats.js";
 
 // Module-scoped consensus state
 let consensusState = {
@@ -79,6 +83,7 @@ export async function sendToModel(browserService, model, prompt) {
   if (submitMatch) await submitMatch.element.click({ force: true });
   else await page.keyboard.press("Enter");
 
+  recordUsage(model); // per-platform send counter, surfaced in health_check
   return true;
 }
 
@@ -150,15 +155,32 @@ export async function runConsensusRound(browserService, prompts, roundNum, opts 
     startTime: Date.now()
   };
 
+  // Per-round login gate: fail fast ONLY on the strong signal — the tab is
+  // sitting on a login/auth URL. A missed input selector is inconclusive
+  // (a mid-navigation page transiently has none), so those proceed and let
+  // the send path decide with its own settle-then-find sequence.
+  await Promise.all(activeModels.map(async (model) => {
+    try {
+      const { loggedIn, reason } = await checkLogin(browserService.getPage(model), model);
+      if (!loggedIn && reason.startsWith('URL contains login pattern')) {
+        barrier.markFailed(model, `login_expired: ${reason}`, 'login');
+      }
+    } catch {
+      // the check itself failing is not evidence — let the send path decide
+    }
+  }));
+
   // Get initial output counts before sending (pre-capture)
   const initial = {};
   for (const model of activeModels) {
-    initial[model] = (await findAll(browserService.getPage(model), SELECTORS[model].output)).length;
     roundData.prompts[model] = (modelPrompts[model] || "").substring(0, 200) + "...";
+    if (barrier.failed.has(model)) continue;
+    initial[model] = (await findAll(browserService.getPage(model), SELECTORS[model].output)).length;
   }
 
   // Send to all in parallel
   await Promise.all(activeModels.map(async (model) => {
+    if (barrier.failed.has(model)) return;
     try {
       await sendToModel(browserService, model, modelPrompts[model]);
     } catch (e) {
@@ -193,12 +215,18 @@ export async function runConsensusRound(browserService, prompts, roundNum, opts 
   roundData.outputs = barrierResults.outputs;
   roundData.errors = barrierResults.errors;
   roundData.timing = barrierResults.timing;
+  recordRound(barrierResults); // persist latency samples + timeout counts
 
   roundData.endTime = Date.now();
   roundData.duration = roundData.endTime - roundData.startTime;
 
   return roundData;
 }
+
+// Per-peer embed budget for cross-pollination (matches context-compression's
+// default). Compression triggers only when combined peer text exceeds
+// peers × this budget.
+const MAX_PEER_CHARS = 2000;
 
 export function generateConsensusPrompt(originalPrompt, rounds, excludeModel = null) {
   const lastRound = rounds[rounds.length - 1];
@@ -209,9 +237,30 @@ export function generateConsensusPrompt(originalPrompt, rounds, excludeModel = n
 
   // Strip peers' verdict lines before embedding: otherwise round-3+ prompts
   // carry parseable "VERDICT: X" lines that a quoting model could feed back
-  // into parseVerdict as a spurious vote.
-  const responsesText = otherModels.map(([model, output]) =>
-    `=== ${model.toUpperCase()} ===\n${stripVerdictLines(output) || "No response"}`
+  // into parseVerdict as a spurious vote. Stripping runs BEFORE compression
+  // so a truncated tail can never resurrect a verdict line.
+  const stripped = {};
+  for (const [model, output] of otherModels) {
+    stripped[model] = stripVerdictLines(output) || "No response";
+  }
+
+  // Compress only genuinely oversized peer text (deep-research-length
+  // answers would otherwise blow up round prompts); short answers
+  // cross-pollinate verbatim. Head+tail survive; the middle is condensed.
+  const combined = Object.values(stripped).reduce((n, t) => n + t.length, 0);
+  const peerTexts = combined > otherModels.length * MAX_PEER_CHARS
+    ? compressForCrossPollination(stripped, excludeModel, MAX_PEER_CHARS)
+    : stripped;
+
+  // Strip AGAIN after compression: a tail cut can begin at a mid-line
+  // "VERDICT: ..." mention, manufacturing a line anchor the first pass
+  // could not see (verified live-reproducible by review).
+  for (const model of Object.keys(peerTexts)) {
+    peerTexts[model] = stripVerdictLines(peerTexts[model]) || "No response";
+  }
+
+  const responsesText = Object.entries(peerTexts).map(([model, text]) =>
+    `=== ${model.toUpperCase()} ===\n${text}`
   ).join('\n\n');
 
   const modelCount = otherModels.length;
