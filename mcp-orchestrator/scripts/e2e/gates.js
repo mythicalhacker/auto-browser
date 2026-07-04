@@ -652,18 +652,24 @@ export async function gateDrivers(log) {
       }
 
       // 2. 1-line round-trip in THIS chat through the production send path.
-      const token = `DRIVER_GATE_${model.toUpperCase()}_${randomBytes(3).toString('hex')}`;
+      // Unique arithmetic, not "repeat this token": a token-echo instruction
+      // inside a project context tripped Fable's safeguards live (chat
+      // paused, no response) — benign math never does.
+      const a = 1000 + Math.floor(Math.random() * 8000);
+      const b = 1000 + Math.floor(Math.random() * 8000);
+      const expected = String(a + b);
       const initial = (await findAll(page, SELECTORS[model].output)).length;
       let out = '';
       try {
-        await sendToModel(browserService, model, `Reply with exactly this token and nothing else: ${token}`);
+        await sendToModel(browserService, model, `What is ${a}+${b}? Reply with just the number.`);
         const done = await waitForComplete(browserService, page, model, initial, 240000);
         assertInto(details, done.complete, `${model}: round-trip completed in ${done.time}ms`);
         if (done.complete) out = await getOutput(browserService, model);
       } catch (e) {
         assertInto(details, false, `${model}: round-trip failed (${e.message})`);
       }
-      assertInto(details, out.includes(token), `${model}: response echoes token ("${out.slice(0, 80).replace(/\n/g, ' ')}")`);
+      assertInto(details, out.includes(expected),
+        `${model}: response contains ${a}+${b}=${expected} ("${out.slice(0, 80).replace(/\n/g, ' ')}")`);
 
       // 3. Missing project → typed warning + normal-chat fallback (0 sends);
       // leaves the tab on a fresh chat for the next provider run.
