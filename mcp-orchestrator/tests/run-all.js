@@ -38,6 +38,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Stats CLI",
+    file: "unit/test-stats-cli.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Browser Tools",
     file: "unit/test-browser-tools.js",
     critical: false,

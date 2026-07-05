@@ -115,6 +115,18 @@ All optional; defaults in `config.js`.
 | `research_export` | Return the synthesized `FINAL.md` for a task |
 | `quota_status` | Per-provider deep-research quota: today's count vs cap, cooldowns, eligibility |
 
+## Monitoring
+
+`scripts/stats.js` is a zero-dependency, read-only CLI for persisted quota,
+latency, and batch artifact status:
+
+```bash
+node scripts/stats.js
+node scripts/stats.js --json
+node scripts/stats.js --batch batch-2026-07-05-a1b2c3
+AUTO_BROWSER_HOME=/tmp/ab-state node scripts/stats.js --batch ~/.auto-browser/research/batch-2026-07-05-a1b2c3 --json
+```
+
 ---
 
 ## The verdict protocol
