@@ -157,6 +157,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "DR Report Frame",
+    file: "unit/test-dr-frame.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Dead-Module Wiring",
     file: "unit/test-dead-module-wiring.js",
     critical: false,

@@ -12,6 +12,7 @@
 import { writeFileSync, mkdirSync } from 'fs';
 import { getProvider, modelConfigFor } from '../models/registry.js';
 import { getDriver } from '../models/drivers/index.js';
+import { harvestReportFrame } from './dr-frame.js';
 import { findFirst, findAll } from '../utils/selectors.js';
 import { checkLogin } from '../utils/login-check.js';
 import { sendToModel } from '../tools/consensus.js';
@@ -170,6 +171,9 @@ export async function waitForResearchComplete(page, provider, {
     .flatMap((g) => g.reportContainer ?? []);
   const outputSelectors = [...sel.output, ...reportContainers];
   const reloadOnEmpty = getProvider(provider)?.capabilities?.reloadOnEmptyOutput;
+  // Providers whose DR report renders in a sandboxed cross-origin iframe
+  // (ChatGPT) are read via the frame, not the message DOM (PR-15).
+  const reportFrameCfg = getProvider(provider)?.reportFrame ?? null;
   const deadline = Date.now() + timeoutMs;
   let lastText = null;
   let stableSince = null;
@@ -187,18 +191,37 @@ export async function waitForResearchComplete(page, provider, {
     if (banner.type === 'quota') return { outcome: 'quota', text: lastText ?? '', banner };
     if (banner.type === 'paused') return { outcome: 'paused', text: lastText ?? '', banner };
 
+    // DR report OOPIF (ChatGPT): read the report from the sandboxed iframe.
+    // reportHostPresent (the report iframe element is mounted) is the DR
+    // completion HOST signal — a present host with empty text means the frame
+    // is still hydrating, NOT that the run produced nothing (the exact
+    // assistantTurns:0 false negative that burned the PR-14 triage).
     let text = '';
-    try {
-      const els = await findAll(page, outputSelectors);
-      if (els.length > 0) text = (await els[els.length - 1].innerText()).trim();
-    } catch {
-      text = '';
+    let reportHostPresent = false;
+    if (reportFrameCfg) {
+      const harvested = await harvestReportFrame(page, reportFrameCfg);
+      reportHostPresent = harvested.hostPresent;
+      text = harvested.text;
+    }
+    // Plain message DOM: the primary path for providers WITHOUT a report frame,
+    // and the FALLBACK for a DR provider that answered as a normal message (no
+    // report host mounted).
+    if (!reportHostPresent && text.length === 0) {
+      try {
+        const els = await findAll(page, outputSelectors);
+        if (els.length > 0) text = (await els[els.length - 1].innerText()).trim();
+      } catch {
+        text = '';
+      }
     }
 
-    // ChatGPT thinking/DR DOM empties after streaming (reloadOnEmptyOutput):
-    // a finished report reads empty and would otherwise time out as failed.
-    // Reload ONCE after a sustained empty stretch to force a server re-render.
-    if (reloadOnEmpty && !reloaded && text.length < DR_MIN_REPORT_CHARS) {
+    // ChatGPT thinking/DR message DOM empties after streaming
+    // (reloadOnEmptyOutput): a finished PLAIN message reads empty and would
+    // otherwise time out as failed. Reload ONCE after a sustained empty
+    // stretch to force a server re-render. Never reload when the report host
+    // is present — the report IS there (in the frame), just hydrating; a
+    // reload would only churn and could drop the frame.
+    if (reloadOnEmpty && !reloaded && !reportHostPresent && text.length < DR_MIN_REPORT_CHARS) {
       if (emptySince === null) emptySince = Date.now();
       else if (Date.now() - emptySince >= stableMs) {
         reloaded = true;
@@ -218,9 +241,16 @@ export async function waitForResearchComplete(page, provider, {
     const streamMatch = await findFirst(page, sel.streaming);
     const streaming = streamMatch && await streamMatch.element.isVisible().catch(() => false);
 
+    // A report frame carrying its in-frame "Research completed" marker is done
+    // even if the main-DOM streaming control lingers (best-effort — the marker
+    // only appears at completion). Text-stability below still governs.
+    const frameDone = reportHostPresent
+      && !!reportFrameCfg?.completeText
+      && text.includes(reportFrameCfg.completeText);
+
     // Completion compares CONTENT, not just length: a report that keeps
     // editing at a constant char count is still changing.
-    if (text.length >= DR_MIN_REPORT_CHARS && !streaming) {
+    if (text.length >= DR_MIN_REPORT_CHARS && (!streaming || frameDone)) {
       if (text === lastText) {
         if (stableSince !== null && Date.now() - stableSince >= stableMs) {
           return { outcome: 'complete', text, banner: null };

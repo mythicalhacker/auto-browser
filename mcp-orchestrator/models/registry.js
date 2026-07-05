@@ -211,6 +211,29 @@ const DEFAULTS = {
       ],
       reportContainer: ['[data-message-author-role="assistant"] .markdown'],
     }],
+    // ChatGPT deep-research reports DO NOT land in the assistant-message DOM.
+    // They render inside a sandboxed cross-origin iframe (OOPIF; main-DOM
+    // element src=…web-sandbox.oaiusercontent.com, title="internal://deep-
+    // research") whose report body lives one SAME-ORIGIN iframe deeper.
+    // page.frames() cannot read the OOPIF grandchild, but JS run inside the
+    // sandbox frame reaches it via contentDocument (research/dr-frame.js).
+    // Live-probed 2026-07-05 (this corrected the false "account-config"
+    // verdict: assistantTurns:0 is NOT a completion signal for DR).
+    //   - frameElement: the main-DOM iframe = the completion HOST signal
+    //     (present ⟺ a report host mounted). NOTE the [class*="deep-research"]
+    //     element is the COMPOSER, not the report — never use it as a host.
+    //   - bodySelector: the report container inside the nested report doc.
+    //   - completeText: the in-frame "Research completed …" marker (best-effort;
+    //     relaxes a stale main-DOM streaming control, never required).
+    reportFrame: {
+      frameElement: [
+        'iframe[src*="web-sandbox.oaiusercontent.com"]',
+        'iframe[title="internal://deep-research"]',
+      ],
+      bodySelector: ['main', 'body'],
+      completeText: 'Research completed',
+      urlPattern: 'web-sandbox.oaiusercontent.com',
+    },
     timeouts: { response: 600000 },
     quotas: {
       // maxPerWindow Infinity (null in JSON) = never warn/throttle, but keep
@@ -486,6 +509,29 @@ function validateProvider(name, d, problems) {
       }
     });
   }
+  // Deep-research report OOPIF (PR-15): reports that render in a sandboxed
+  // cross-origin iframe are harvested via the frame element, not the message
+  // DOM. frameElement is the required completion HOST signal.
+  if (d.reportFrame !== undefined) {
+    const rf = d.reportFrame;
+    if (!isPlainObject(rf)) p('"reportFrame" must be an object');
+    else {
+      if (!isStringArray(rf.frameElement) || rf.frameElement.length === 0) {
+        p('"reportFrame.frameElement" must be a non-empty array of strings');
+      }
+      // Non-empty when present: an empty bodySelector makes the harvester read
+      // nothing (the `?? default` fallback does not replace []), stranding a
+      // finished report as a timeout.
+      if (rf.bodySelector !== undefined && (!isStringArray(rf.bodySelector) || rf.bodySelector.length === 0)) {
+        p('"reportFrame.bodySelector" must be a non-empty array of strings');
+      }
+      for (const key of ['completeText', 'urlPattern']) {
+        if (rf[key] !== undefined && (typeof rf[key] !== 'string' || !rf[key])) {
+          p(`"reportFrame.${key}" must be a non-empty string`);
+        }
+      }
+    }
+  }
   const q = d.quotas;
   if (!isPlainObject(q)) {
     p('"quotas" must be an object with a "sends" limit');
@@ -667,6 +713,13 @@ export function loginUrlPatternsFor(name) {
 /** Model-selection config {choices, default, cheapest, testModel?} or null. */
 export function modelConfigFor(name) {
   return registry[name]?.models ?? null;
+}
+
+/** DR report-OOPIF descriptor {frameElement, bodySelector?, completeText?,
+ * urlPattern?} for providers whose reports render in a sandboxed iframe, or
+ * null. Drives frame-based completion + harvest in the runner (PR-15). */
+export function reportFrameFor(name) {
+  return registry[name]?.reportFrame ?? null;
 }
 
 /** The model e2e gates pin (cheapest unless a descriptor overrides testModel). */
