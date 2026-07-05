@@ -164,6 +164,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "DR Report Artifact",
+    file: "unit/test-dr-artifact.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Dead-Module Wiring",
     file: "unit/test-dead-module-wiring.js",
     critical: false,

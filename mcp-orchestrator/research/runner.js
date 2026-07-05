@@ -13,6 +13,7 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { getProvider, modelConfigFor } from '../models/registry.js';
 import { getDriver } from '../models/drivers/index.js';
 import { harvestReportFrame } from './dr-frame.js';
+import { harvestReportArtifact } from './dr-artifact.js';
 import { findFirst, findAll } from '../utils/selectors.js';
 import { checkLogin } from '../utils/login-check.js';
 import { sendToModel } from '../tools/consensus.js';
@@ -174,6 +175,10 @@ export async function waitForResearchComplete(page, provider, {
   // Providers whose DR report renders in a sandboxed cross-origin iframe
   // (ChatGPT) are read via the frame, not the message DOM (PR-15).
   const reportFrameCfg = getProvider(provider)?.reportFrame ?? null;
+  // Providers whose full report renders in an expandable same-origin artifact
+  // panel (Claude) — the inline message is only a summary; the full report is
+  // read (once, at completion) by opening the panel (PR-16).
+  const reportArtifactCfg = getProvider(provider)?.reportArtifact ?? null;
   const deadline = Date.now() + timeoutMs;
   let lastText = null;
   let stableSince = null;
@@ -253,7 +258,9 @@ export async function waitForResearchComplete(page, provider, {
     if (text.length >= DR_MIN_REPORT_CHARS && (!streaming || frameDone)) {
       if (text === lastText) {
         if (stableSince !== null && Date.now() - stableSince >= stableMs) {
-          return { outcome: 'complete', text, banner: null };
+          // The inline text drove completion; upgrade to the fuller artifact
+          // panel body if this provider renders one (Claude). Never shortens.
+          return { outcome: 'complete', text: await upgradeWithArtifact(page, reportArtifactCfg, text), banner: null };
         }
         if (stableSince === null) stableSince = Date.now();
       } else {
@@ -267,6 +274,24 @@ export async function waitForResearchComplete(page, provider, {
     if (Date.now() >= deadline) return { outcome: 'timeout', text: lastText ?? '', banner: null };
     await page.waitForTimeout(pollMs);
   }
+}
+
+/**
+ * For a provider whose full report renders in an expandable artifact panel
+ * (Claude), open the panel and return its (longer) body in place of the inline
+ * message text. Monotonic: only replaces when the artifact text is strictly
+ * longer, so a missing/unreadable panel or a non-artifact provider keeps the
+ * inline text. Never throws — a harvest failure falls back to `messageText`.
+ */
+async function upgradeWithArtifact(page, cfg, messageText) {
+  if (!cfg) return messageText;
+  try {
+    const art = await harvestReportArtifact(page, cfg);
+    if (art.artifactPresent && art.text.length > messageText.length) return art.text;
+  } catch {
+    // fall through to the inline text
+  }
+  return messageText;
 }
 
 function writeArtifact(task, provider, text, extras) {

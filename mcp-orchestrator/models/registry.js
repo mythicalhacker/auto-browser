@@ -117,6 +117,26 @@ const DEFAULTS = {
       progressMarker: ['button[aria-label*="Open research panel"]:not([aria-label^="Stopped"])'],
       reportContainer: ['div[role="article"][aria-label^="Message"] .font-claude-response'],
     }],
+    // Claude renders a deep-research report as an expandable "Document" ARTIFACT
+    // (same-origin main DOM; NOT a cross-origin frame like ChatGPT). The inline
+    // assistant message holds only a SHORT summary + a card preview; the FULL
+    // report is the side-panel's inner markdown, which is in the DOM only once
+    // the panel is open. Live-probed 2026-07-05 (PR-16): message-DOM harvest got
+    // ~0.5k summary / ~1.2k with the card preview; the panel holds the complete
+    // ~1.4k report body. research/dr-artifact.js reads the panel (opening it via
+    // the View trigger when a narrow/fresh viewport left it closed).
+    //   - card: the artifact card in the message = "a full report exists" signal.
+    //   - trigger: the View button that opens the panel when it is not already
+    //     open (wide viewports render it side-by-side automatically).
+    //   - panel: the open artifact-panel region (host signal that it is mounted).
+    //   - content: the report body inside the panel (longest match; both classes
+    //     resolve the panel markdown, so a class rename on either still reads).
+    reportArtifact: {
+      card: ['[class*="artifact-block"]'],
+      trigger: ['[class*="artifact-block"] button[aria-label^="View "]', 'button[aria-label^="View "]'],
+      panel: ['div[role="region"][aria-label^="Artifact panel"]'],
+      content: ['.standard-markdown', '.font-claude-response'],
+    },
     timeouts: { response: 300000 },
     quotas: {
       sends: { maxPerWindow: 900, windowMs: 5 * 60 * 60 * 1000, name: '5 hours' },
@@ -532,6 +552,27 @@ function validateProvider(name, d, problems) {
       }
     }
   }
+  // Deep-research report ARTIFACT (PR-16): reports Claude renders in an
+  // expandable Document panel are harvested by opening the panel and reading
+  // its inner markdown. card (presence signal) + panel (where to read) are the
+  // required anchors; trigger/content are optional (non-empty when present).
+  if (d.reportArtifact !== undefined) {
+    const ra = d.reportArtifact;
+    if (!isPlainObject(ra)) p('"reportArtifact" must be an object');
+    else {
+      if (!isStringArray(ra.card) || ra.card.length === 0) {
+        p('"reportArtifact.card" must be a non-empty array of strings');
+      }
+      if (!isStringArray(ra.panel) || ra.panel.length === 0) {
+        p('"reportArtifact.panel" must be a non-empty array of strings');
+      }
+      for (const key of ['trigger', 'content']) {
+        if (ra[key] !== undefined && (!isStringArray(ra[key]) || ra[key].length === 0)) {
+          p(`"reportArtifact.${key}" must be a non-empty array of strings`);
+        }
+      }
+    }
+  }
   const q = d.quotas;
   if (!isPlainObject(q)) {
     p('"quotas" must be an object with a "sends" limit');
@@ -720,6 +761,13 @@ export function modelConfigFor(name) {
  * null. Drives frame-based completion + harvest in the runner (PR-15). */
 export function reportFrameFor(name) {
   return registry[name]?.reportFrame ?? null;
+}
+
+/** DR report-ARTIFACT descriptor {card, trigger?, panel, content?} for providers
+ * (Claude) whose reports render in an expandable same-origin Document panel, or
+ * null. Drives opening + full-text harvest in the runner (PR-16). */
+export function reportArtifactFor(name) {
+  return registry[name]?.reportArtifact ?? null;
 }
 
 /** The model e2e gates pin (cheapest unless a descriptor overrides testModel). */
