@@ -89,9 +89,15 @@ const DEFAULTS = {
     // resolves an explicit model (per-call → per-task → this default). Cost
     // control: `cheapest` (also the e2e testModel unless a gate overrides).
     models: {
-      choices: ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5'],
+      // Live-calibrated 2026-07-05 (GATE 14a): base names of the picker's
+      // full lineup (behind "More models"). Was memory-seeded to 4 names.
+      choices: ['Fable 5', 'Opus 4.8', 'Opus 4.7', 'Opus 4.6', 'Opus 3', 'Sonnet 5', 'Sonnet 4.6', 'Haiku 4.5'],
       default: 'Sonnet 5',
       cheapest: 'Haiku 4.5',
+      // The picker opens COLLAPSED (current model + a "More models" expander);
+      // the full lineup is behind it. Calibration clicks this (matched by
+      // menuitem text) before enumerating.
+      pickerExpandText: 'More models',
     },
     // Default ensureChat profile for deep-research runs (user preference:
     // top models with thinking; claude thinking is built in, effort=max).
@@ -176,10 +182,11 @@ const DEFAULTS = {
       // reload forces React to re-render from server state.
       reloadOnEmptyOutput: true,
     },
-    // Seed choices (calibration re-discovers live). The picker mixes
-    // intelligence tiers and Pro variants; 'Instant' is the cheapest tier.
+    // Live-calibrated 2026-07-05 (GATE 14a): the picker offers these 5 tiers;
+    // 'Instant' is the cheapest. Was memory-seeded with 5 extra names (Pro
+    // Standard, GPT-5.x, o3) that this account's picker does not offer.
     models: {
-      choices: ['Instant', 'Medium', 'High', 'Extra High', 'Pro Standard', 'Pro Extended', 'GPT-5.5', 'GPT-5.4', 'GPT-5.3', 'o3'],
+      choices: ['Instant', 'Medium', 'High', 'Extra High', 'Pro Extended'],
       default: 'Medium',
       cheapest: 'Instant',
     },
@@ -308,6 +315,19 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 // newlines ('Pro\nExtended'), so a name must be compared the way the driver's
 // clickItemByText/labelMatchesModel compare it.
 const normName = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+// Does a live picker label OFFER a configured model name? Calibration reads
+// FULL menu-item text (name + optional description: 'haiku 4.5 fastest…'), so
+// a configured name is offered when it EXACTLY equals or is a leading token of
+// the label. NOT raw substring ('high' must not be offered by 'extra high'),
+// and NOT the reverse short-pill rule (labelMatchesModel's 'pro'⊃'3.1 pro') —
+// that would make 'high' offer 'extra high' via endsWith and mask a real
+// removal; the pill short-form never appears in a calibration read.
+const labelOffers = (liveLabel, name) => {
+  const L = normName(liveLabel);
+  const n = normName(name);
+  if (!L || !n) return false;
+  return L === n || L.startsWith(`${n} `);
+};
 
 // Provider keys feed TIMEOUT_RESPONSE_<KEY.toUpperCase()> env names and the
 // '=== KEY ===' consensus section headers: lowercase alphanumeric only, so
@@ -426,6 +446,9 @@ function validateProvider(name, d, problems) {
       if (M.testModel !== undefined) {
         if (typeof M.testModel !== 'string' || !M.testModel) p('"models.testModel" must be a non-empty string');
         else if (!inChoices(M.testModel)) p(`"models.testModel" (${JSON.stringify(M.testModel)}) must be one of models.choices`);
+      }
+      if (M.pickerExpandText !== undefined && (typeof M.pickerExpandText !== 'string' || !M.pickerExpandText)) {
+        p('"models.pickerExpandText" must be a non-empty string');
       }
     }
   }
@@ -662,18 +685,25 @@ export function modelDriftReport(name, liveChoices) {
   const cfg = registry[name]?.models;
   if (!cfg) return null;
   const live = Array.isArray(liveChoices) ? liveChoices : [];
-  const liveNorm = live.map(normName);
-  const cfgNorm = cfg.choices.map(normName);
+  // A live picker LABEL may carry a description ('Haiku 4.5 Fastest for quick
+  // answers') or a trailing badge, so "present" must use the SAME boundary-
+  // anchored matcher the driver uses to SELECT (labelOffers ≡ labelMatchesModel)
+  // — exact string equality would false-flag a model that is actually offered.
+  const present = (n) => live.some((L) => labelOffers(L, n));
+  const missing = cfg.choices.filter((c) => !present(c));                        // configured but not offered live
+  const added = live.filter((L) => !cfg.choices.some((c) => labelOffers(L, c))); // offered live but not configured
   return {
     provider: name,
     configured: cfg.choices,
     live,
-    missing: cfg.choices.filter((c) => !liveNorm.includes(normName(c))), // configured but not offered live
-    added: live.filter((c) => !cfgNorm.includes(normName(c))),           // offered live but not configured
-    cheapestPresent: liveNorm.includes(normName(cfg.cheapest)),
-    defaultPresent: liveNorm.includes(normName(cfg.default)),
-    drifted: cfg.choices.length !== live.length
-      || cfg.choices.some((c, i) => normName(c) !== normName(live[i])),
+    missing,
+    added,
+    cheapestPresent: present(cfg.cheapest),
+    defaultPresent: present(cfg.default),
+    // Drift = a real set difference under anchored matching. Positional name
+    // equality would ALWAYS flag drift when labels carry descriptions, giving
+    // a self-contradictory "drifted, missing:[] added:[]".
+    drifted: missing.length > 0 || added.length > 0,
   };
 }
 

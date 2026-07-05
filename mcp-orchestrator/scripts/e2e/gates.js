@@ -918,8 +918,20 @@ export async function gateModelSelect(log) {
       if (drift?.drifted) {
         details.push(`WARN: ${model} model drift vs registry — missing:[${drift.missing.join(', ')}] added:[${drift.added.join(', ')}]`);
       }
-      assertInto(details, drift?.cheapestPresent === true,
-        `${model}: cheapest "${cheapest}" is actually offered by the live picker`);
+      // Calibration is best-effort DISCOVERY (some pickers enumerate
+      // unreliably — claude's lineup hides behind a flaky "More models"
+      // expander that can re-render to a PARTIAL list). Hard-FAIL a missing
+      // cheapest only on a COMPLETE read (>= configured count); a partial read
+      // WARNs and defers to the selection step, the AUTHORITATIVE proof that
+      // the cheapest is actually selectable (a partial read that drops the
+      // last-listed cheapest must not fake a failure).
+      const readCount = cal.choices?.length ?? 0;
+      if (readCount >= (drift?.configured?.length ?? Infinity)) {
+        assertInto(details, drift?.cheapestPresent === true,
+          `${model}: cheapest "${cheapest}" is offered by the live picker`);
+      } else {
+        details.push(`WARN: ${model} calibration inconclusive (${readCount} of ${drift?.configured?.length ?? '?'} models) — relying on the selection step for cheapest availability`);
+      }
 
       // 2. Select cheapest, verify picker evidence, 1-line round-trip.
       const setup = await getDriver(model).ensureChat(page, { model: cheapest, modelFallback: configuredDefault });

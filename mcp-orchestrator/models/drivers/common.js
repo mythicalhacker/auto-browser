@@ -457,33 +457,62 @@ export async function selectModel(page, d, modelName, result, { fallback = null 
   return false;
 }
 
+// Model menus hydrate slowly and unevenly (live: gemini rendered 0 items at a
+// single 700ms sample, claude only 1 of several) — POLL, keeping the largest
+// stable list, rather than trusting one read.
+const CALIBRATE_MS = Number(process.env.MODEL_CALIBRATE_MS) || 9000;
+
 /**
  * Live calibration: open the model picker and read every offered label (the
- * picker is the source of truth for what's actually selectable). Returns the
- * de-duplicated list; the caller diffs it against the configured choices via
- * registry.modelDriftReport. Sends nothing.
+ * picker is the source of truth for what's actually selectable). Polls until
+ * the item list stops growing (2 stable reads) or the window elapses, keeping
+ * the largest list seen. Returns the de-duplicated list; the caller diffs it
+ * against the configured choices via registry.modelDriftReport. Sends nothing.
  */
 export async function calibrateModels(page, d) {
   const sel = d.selectors;
   const opened = await clickFirst(page, sel.modelPicker);
   if (!opened.ok) return { ok: false, choices: [], evidence: 'model picker did not open' };
-  await settle(page, MENU_SETTLE_MS);
-  const raw = [];
-  for (const s of sel.modelPickerItem ?? []) {
-    let els;
-    try { els = await page.$$(s); } catch { continue; }
-    for (const el of els) {
-      try {
-        const t = String(await el.innerText()).replace(/\s+/g, ' ').trim();
-        if (t) raw.push(t);
-      } catch { /* detached — skip */ }
+  const readItems = async () => {
+    const raw = [];
+    for (const s of sel.modelPickerItem ?? []) {
+      let els;
+      try { els = await page.$$(s); } catch { continue; }
+      for (const el of els) {
+        try {
+          const t = String(await el.innerText()).replace(/\s+/g, ' ').trim();
+          if (t) raw.push(t);
+        } catch { /* detached — skip */ }
+      }
+      if (els.length > 0) break; // the structural selector matched
     }
-    if (els.length > 0) break; // the structural selector matched
-  }
+    const seen = new Set();
+    return raw.filter((c) => { const k = c.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+  // Read the collapsed view FIRST and keep the MAX list ever seen — some
+  // pickers open collapsed (claude: current model + a "More models" expander),
+  // and the expander itself is flaky (it can re-render the menu to empty). By
+  // capturing the collapsed items before expanding and never shrinking `best`,
+  // a failed expansion degrades to the collapsed list rather than to zero.
+  const expandText = d.models?.pickerExpandText;
+  let best = [];
+  let expanded = false;
+  let stable = 0;
+  const deadline = Date.now() + CALIBRATE_MS;
+  do {
+    await settle(page, MENU_SETTLE_MS);
+    const items = await readItems();
+    if (items.length > best.length) { best = items; stable = 0; }
+    else if (best.length > 0) { stable += 1; }
+    // Once the collapsed list is captured, click the expander ONCE for more.
+    if (!expanded && expandText && best.length > 0) {
+      expanded = true;
+      await clickItemByText(page, ['[role="menu"] [role="menuitem"]', '[role="menuitem"]'], expandText);
+      stable = 0;
+    }
+  } while (stable < 2 && Date.now() < deadline);
   await page.keyboard.press('Escape');
-  const seen = new Set();
-  const choices = raw.filter((c) => { const k = c.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
-  return { ok: choices.length > 0, choices, evidence: choices.join(' | ').slice(0, 400) };
+  return { ok: best.length > 0, choices: best, evidence: best.join(' | ').slice(0, 400) };
 }
 
 /** Current model per the picker label (whitespace-normalized, case kept), or

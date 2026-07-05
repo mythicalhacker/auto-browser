@@ -135,13 +135,33 @@ console.log('\nregistry model-config schema:');
 console.log('\nmodel drift report (picker is the source of truth):');
 {
   registry._rebuildForTest(null);
-  const noDrift = registry.modelDriftReport('claude', ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5']);
+  // Derive from the registry so this stays correct as choices are recalibrated.
+  const cfg = registry.modelConfigFor('claude');
+  const choices = cfg.choices;
+  const noDrift = registry.modelDriftReport('claude', choices);
   assert(noDrift.drifted === false && noDrift.cheapestPresent && noDrift.defaultPresent, 'identical live snapshot → no drift, resolvable names present');
-  const added = registry.modelDriftReport('claude', ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5', 'Fable 6']);
-  assert(added.drifted === true && added.added.includes('Fable 6') && added.missing.length === 0, 'a new live model is reported as added drift');
-  const missingCheap = registry.modelDriftReport('claude', ['Fable 5', 'Opus 4.8', 'Sonnet 5']);
-  assert(missingCheap.missing.includes('Haiku 4.5') && missingCheap.cheapestPresent === false,
+  const added = registry.modelDriftReport('claude', [...choices, 'Nonesuch 9']);
+  assert(added.drifted === true && added.added.includes('Nonesuch 9') && added.missing.length === 0, 'a new live model is reported as added drift');
+  const missingCheap = registry.modelDriftReport('claude', choices.filter((c) => c !== cfg.cheapest));
+  assert(missingCheap.missing.includes(cfg.cheapest) && missingCheap.cheapestPresent === false,
     'cheapest absent from the live picker is flagged (would break cost pinning)');
+
+  // LIVE REALITY (GATE 14a): picker labels carry descriptions
+  // ("Haiku 4.5 Fastest for quick answers"). Anchored matching must treat a
+  // described label as offering the configured base name — exact-equality
+  // drift falsely flagged them missing.
+  const withDesc = registry.modelDriftReport('claude', choices.map((c) => `${c} — some description text`));
+  assert(withDesc.cheapestPresent === true && withDesc.defaultPresent === true,
+    'description-bearing labels still register cheapest/default as present (anchored match)');
+  assert(withDesc.missing.length === 0,
+    'no configured model is falsely reported missing when live labels carry descriptions');
+
+  // A removed model must be flagged missing even when a SUPERSTRING model is
+  // still live: "extra high".endsWith(" high") must NOT make live "High" offer
+  // a gone "Extra High" (the reverse short-pill rule is not applied to drift).
+  const gone = registry.modelDriftReport('chatgpt', ['Instant', 'Medium', 'High', 'Pro Extended']); // Extra High dropped
+  assert(gone.missing.includes('Extra High'), '"Extra High" removal is flagged missing though "High" is still offered');
+  assert(gone.cheapestPresent === true && gone.drifted === true, 'cheapest still present; drift correctly reported');
 }
 
 // --- driver model_unavailable fallback (mirrors project_not_found) ----------
