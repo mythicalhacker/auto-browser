@@ -17,13 +17,17 @@ import {
   ensureChrome, cdpReady, weSpawnedChrome, ensureModelTabs, openModelTabs,
   reduceModelTabsTo, loginStatus, freshModelChats, adoptRunningChrome, MODEL_URLS,
 } from './chrome.js';
-import { providerNames } from '../../models/registry.js';
+import { providerNames, getProvider, testModelFor, modelDriftReport } from '../../models/registry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LEDGER_FILE = join(STATE_DIR, 'ledger.json');
 const LOGINS_FILE = join(STATE_DIR, 'logins.json');
 const LEDGER_LIMIT = 30; // hard per-site cap for the whole run
 const PAUSE_MS = 120000; // minimum gap between consensus runs
+// PR-14 cost control: every consensus/round gate pins the cheapest model
+// (the registry testModel = cheapest) unless overridden. A silent fallback to
+// a pricier model is caught by the picker-evidence assertions below.
+const MODEL_POLICY = process.env.E2E_MODEL_POLICY || 'cheapest';
 
 // Pin EVERY response-timeout knob: per-model env vars outrank TIMEOUT_RESPONSE
 // in the config precedence, and McpClient spawns with {...process.env}, so an
@@ -92,6 +96,19 @@ function markConsensusEnd() {
 function assertInto(details, cond, label) {
   details.push(`${cond ? 'PASS' : 'FAIL'}: ${label}`);
   return cond;
+}
+
+/**
+ * True only when a selection record (from selectModelsForRun / consensusState
+ * .models) shows the REQUESTED model was verified with NO fallback. `ok===true
+ * && !warning` is the discriminator: a model_unavailable fallback also sets
+ * ok:true but carries a warning, and a silent inherit leaves ok:false or the
+ * wrong requested name. This is what makes "no silent upgrade to a pricier
+ * model" a real assertion rather than the tautological requested-name echo.
+ */
+function pinnedTo(sel, name) {
+  return !!sel && sel.ok === true && !sel.warning
+    && (!name || String(sel.requested ?? '').toLowerCase() === String(name).toLowerCase());
 }
 
 async function pollStatus(client, { timeoutMs = 360000, intervalMs = 5000 } = {}) {
@@ -236,7 +253,7 @@ export async function gateRace(log) {
   // send to each discovered tab even though only usable ones get a prompt.
   charge(Object.keys(await openModelTabs()), 1);
 
-  const { runConsensusRound } = await import('../../tools/consensus.js');
+  const { runConsensusRound, selectModelsForRun } = await import('../../tools/consensus.js');
   const { browserService } = await import('../../services/browser-service.js');
 
   const tokens = {};
@@ -249,6 +266,15 @@ export async function gateRace(log) {
   await browserService.connect();
   const active = browserService.getActiveModels().filter((m) => usable.includes(m));
   assertInto(details, active.length === usable.length, `all usable models discovered (${active.join(',')})`);
+
+  // PR-14: pin the cheapest model explicitly (never inherit last-used) and
+  // assert the picker verified it — a silent fallback to a pricier model fails.
+  const selection = await selectModelsForRun(browserService, active, { policy: MODEL_POLICY });
+  for (const m of active) {
+    const cheapest = testModelFor(m);
+    assertInto(details, pinnedTo(selection[m], cheapest),
+      `${m}: cheapest "${cheapest}" selected + verified, NO fallback (${selection[m]?.evidence ?? selection[m]?.warning ?? 'no evidence'})`);
+  }
 
   const round = await runConsensusRound(browserService, prompts, 1);
   markConsensusEnd();
@@ -293,6 +319,7 @@ export async function gateAgreeable(log) {
     const res = await client.callTool('start_consensus', {
       prompt: 'What is 2+2? Answer with just the number.',
       max_rounds: MAX_ROUNDS,
+      model_policy: MODEL_POLICY, // PR-14: cheap-model regression run
     });
     assertInto(details, res.isError !== true, 'start_consensus accepted');
     const status = await pollStatus(client, { timeoutMs: 900000 });
@@ -301,6 +328,14 @@ export async function gateAgreeable(log) {
 
     const state = readStateFile(client);
     refund(openNow, MAX_ROUNDS - (state.rounds?.length || MAX_ROUNDS));
+    // Cost proof (real, not a name echo): the PERSISTED selection must show
+    // each provider verified on its cheapest with NO fallback. A regression
+    // that inherits last-used or falls back to a pricier default fails here.
+    for (const m of openNow) {
+      const cheapest = testModelFor(m);
+      assertInto(details, pinnedTo(state.models?.[m], cheapest),
+        `${m}: run verified the cheapest model "${cheapest}", no silent upgrade (${state.models?.[m]?.evidence ?? state.models?.[m]?.warning ?? 'no record'})`);
+    }
     const messaged = new Set((state.rounds || []).flatMap((r) => Object.keys(r.outputs || {})));
     assertInto(details, [...messaged].every((m) => openNow.includes(m)),
       `budget integrity: every messaged model was pre-charged (${[...messaged].join(',')})`);
@@ -356,6 +391,7 @@ export async function gateTimeout(log) {
     const res = await client.callTool('start_consensus', {
       prompt: 'Write a 200-word paragraph about how AI models reach consensus.',
       max_rounds: MAX_ROUNDS,
+      model_policy: MODEL_POLICY,
     });
     assertInto(details, res.isError !== true, 'start_consensus accepted');
     const status = await pollStatus(client, { timeoutMs: 240000 });
@@ -438,11 +474,13 @@ export async function gateDoubleStart(log) {
     const first = await client.callTool('start_consensus', {
       prompt: 'What is 5+5? Answer with just the number.',
       max_rounds: MAX_ROUNDS,
+      model_policy: MODEL_POLICY,
     });
     assertInto(details, first.isError !== true, 'first start_consensus accepted');
     const second = await client.callTool('start_consensus', {
       prompt: 'What is 6+6? Answer with just the number.',
       max_rounds: MAX_ROUNDS,
+      model_policy: MODEL_POLICY,
     });
     assertInto(details, second.isError === true, 'second start_consensus while active returns isError (single-flight)');
     const status = await pollStatus(client, { timeoutMs: 900000 });
@@ -492,6 +530,7 @@ export async function gateColdStart(log) {
     // The RPC blocks for the whole round; ceiling is 240s per model.
     const round = await client.callTool('send_single_round', {
       prompt: 'What is 3+3? Answer with just the number.',
+      model_policy: MODEL_POLICY,
     }, 300000);
     assertInto(details, round.isError !== true, 'send_single_round succeeded');
     const text = round.content?.[0]?.text || '';
@@ -536,6 +575,7 @@ export async function gateCompression(log) {
     const res = await client.callTool('start_consensus', {
       prompt: 'Write a thorough essay of at least 800 words arguing for either tabs or spaces for code indentation — pick exactly one side. This doubles as a length test: do NOT summarize or shorten; produce the full essay.',
       max_rounds: MAX_ROUNDS,
+      model_policy: MODEL_POLICY,
     });
     assertInto(details, res.isError !== true, 'start_consensus accepted');
     const status = await pollStatus(client, { timeoutMs: 1200000 });
@@ -838,6 +878,128 @@ export async function gateSynthesize(log) {
   return details;
 }
 
+/**
+ * Live: PR-14 GATE 14a — explicit per-task model selection, pinned cheapest.
+ * Per provider: calibrate the live picker (drift warning), select the cheapest
+ * model with picker-verified evidence, prove a 1-line round-trip on it, then a
+ * deliberately-bogus model → typed model_unavailable warning + default used +
+ * still round-trips. Finally a mixed-model consensus whose status must surface
+ * the verified model names (a silent upgrade fails the gate). Cheap by design:
+ * ≤2 msgs/provider for the per-provider proof + ≤2 rounds for the mixed run. */
+export async function gateModelSelect(log) {
+  const details = [];
+  const usable = usableModels();
+  if (!usable || usable.length < 1) return ['BLOCKED: needs gateLogins with >=1 usable model first'];
+
+  const { getDriver } = await import('../../models/drivers/index.js');
+  const { calibrateModels } = await import('../../models/drivers/common.js');
+  const { sendToModel, waitForComplete, getOutput } = await import('../../tools/consensus.js');
+  const { SELECTORS } = await import('../../config.js');
+  const { findAll } = await import('../../utils/selectors.js');
+  const { browserService } = await import('../../services/browser-service.js');
+
+  await pauseBetweenConsensusRuns(log);
+  await browserService.connect();
+  const present = usable.filter((m) => browserService.getPage(m));
+  // 2 round-trips per provider (cheapest proof + bogus-fallback proof).
+  charge(present, 2);
+  try {
+    for (const model of present) {
+      const page = browserService.getPage(model);
+      const d = getProvider(model);
+      if (!d.models) { details.push(`SKIP: ${model} has no models config — nothing to select`); continue; }
+      const cheapest = testModelFor(model);
+      const configuredDefault = d.models.default;
+
+      // 1. Calibrate the live picker (the source of truth) + drift report.
+      const cal = await calibrateModels(page, d);
+      const drift = modelDriftReport(model, cal.choices);
+      details.push(`${cal.ok ? 'PASS' : 'WARN'}: ${model} picker calibrated — ${cal.choices.length} models: ${cal.choices.join(' | ') || '(none)'}`);
+      if (drift?.drifted) {
+        details.push(`WARN: ${model} model drift vs registry — missing:[${drift.missing.join(', ')}] added:[${drift.added.join(', ')}]`);
+      }
+      assertInto(details, drift?.cheapestPresent === true,
+        `${model}: cheapest "${cheapest}" is actually offered by the live picker`);
+
+      // 2. Select cheapest, verify picker evidence, 1-line round-trip.
+      const setup = await getDriver(model).ensureChat(page, { model: cheapest, modelFallback: configuredDefault });
+      assertInto(details, setup.verified.model?.ok === true && !setup.warnings.some((w) => w.code === 'model_unavailable'),
+        `${model}: cheapest "${cheapest}" selected + picker-verified, NO fallback (${setup.verified.model?.evidence})`);
+      const a1 = 1000 + Math.floor(Math.random() * 8000);
+      const b1 = 1000 + Math.floor(Math.random() * 8000);
+      const exp1 = String(a1 + b1);
+      const init1 = (await findAll(page, SELECTORS[model].output)).length;
+      let out1 = '';
+      try {
+        await sendToModel(browserService, model, `What is ${a1}+${b1}? Reply with just the number.`);
+        const done = await waitForComplete(browserService, page, model, init1, 240000);
+        if (done.complete) out1 = await getOutput(browserService, model);
+      } catch (e) { assertInto(details, false, `${model}: cheap-model round-trip failed (${e.message})`); }
+      assertInto(details, out1.includes(exp1),
+        `${model}: cheap-model round-trip answered ${a1}+${b1}=${exp1} ("${out1.slice(0, 60).replace(/\n/g, ' ')}")`);
+
+      // 3. Bogus model → model_unavailable warning + configured default, still completes.
+      const bogus = `zzmodel-${randomBytes(3).toString('hex')}`;
+      const fb = await getDriver(model).ensureChat(page, { model: bogus, modelFallback: configuredDefault });
+      assertInto(details, fb.warnings.some((w) => w.code === 'model_unavailable'),
+        `${model}: bogus model "${bogus}" yields a typed model_unavailable warning`);
+      assertInto(details, fb.verified.model?.ok === true,
+        `${model}: fell back to the configured default "${configuredDefault}" (verified: ${fb.verified.model?.evidence})`);
+      const a2 = 1000 + Math.floor(Math.random() * 8000);
+      const b2 = 1000 + Math.floor(Math.random() * 8000);
+      const exp2 = String(a2 + b2);
+      const init2 = (await findAll(page, SELECTORS[model].output)).length;
+      let out2 = '';
+      try {
+        await sendToModel(browserService, model, `What is ${a2}+${b2}? Reply with just the number.`);
+        const done = await waitForComplete(browserService, page, model, init2, 240000);
+        if (done.complete) out2 = await getOutput(browserService, model);
+      } catch (e) { assertInto(details, false, `${model}: fallback round-trip failed (${e.message})`); }
+      assertInto(details, out2.includes(exp2),
+        `${model}: task still completes on the default after model_unavailable (${a2}+${b2}=${exp2})`);
+    }
+  } finally {
+    markConsensusEnd();
+    await browserService.disconnect();
+  }
+
+  // 4. Mixed-model consensus: each provider given an EXPLICIT named model
+  // (via the models map, not a policy). The PERSISTED selection must show each
+  // verified on the requested name with no fallback — asserted on state.models,
+  // not a status name-echo (which prints the requested name regardless).
+  const mixable = present.filter((m) => getProvider(m).models);
+  if (mixable.length >= 2) {
+    await pauseBetweenConsensusRuns(log);
+    charge(mixable, 2);
+    const client = new McpClient({ testName: 'modelselect', env: responseTimeoutEnv('240000') });
+    try {
+      await client.initialize();
+      const mixed = Object.fromEntries(mixable.map((m) => [m, testModelFor(m)])); // explicit per-provider name (cheapest → cheap)
+      const res = await client.callTool('start_consensus', {
+        prompt: 'What is 2+2? Answer with just the number.',
+        max_rounds: 2,
+        models: mixed,
+      });
+      assertInto(details, res.isError !== true, 'mixed-model start_consensus accepted (explicit per-provider models map)');
+      const status = await pollStatus(client, { timeoutMs: 600000 });
+      markConsensusEnd();
+      assertInto(details, /consensus_reached|max_rounds_reached/.test(status), `mixed-model run terminal (${status.split('\n')[0]})`);
+      const state = JSON.parse(readFileSync(client.stateFile, 'utf8'));
+      for (const m of mixable) {
+        const name = mixed[m];
+        assertInto(details, pinnedTo(state.models?.[m], name),
+          `${m}: explicit model "${name}" verified with no fallback (${state.models?.[m]?.evidence ?? state.models?.[m]?.warning ?? 'no record'})`);
+      }
+      refund(mixable, 2 - (state.rounds?.length || 2));
+    } finally {
+      await client.close();
+    }
+  } else {
+    details.push('SKIP: mixed-model consensus needs >=2 usable models');
+  }
+  return details;
+}
+
 export const GATES = {
   handshake: gateHandshake,
   validation: gateValidation,
@@ -854,6 +1016,7 @@ export const GATES = {
   drivers: gateDrivers,
   researchdr: gateResearchDR,
   synthesize: gateSynthesize,
+  modelselect: gateModelSelect,
 };
 
 /** Spawn caffeinate for the duration of the process (live phases). */

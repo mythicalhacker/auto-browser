@@ -2,6 +2,8 @@
 import { checkAllLogins } from './login-check.js';
 import { getAllUsageStats } from './rate-limiter.js';
 import { latencySummary } from './latency-stats.js';
+import { getProvider } from '../models/registry.js';
+import { readModelLabel } from '../models/drivers/common.js';
 
 export async function getHealthReport(browserService) {
   const report = {
@@ -10,6 +12,7 @@ export async function getHealthReport(browserService) {
     memory: process.memoryUsage(),
     chrome: { connected: false, models: [], tabCount: 0 },
     logins: {},
+    models: {},
     overall: 'unknown'
   };
 
@@ -32,6 +35,25 @@ export async function getHealthReport(browserService) {
       const { allLoggedIn, results } = await checkAllLogins(pages);
       report.logins = results;
       report._allLoggedIn = allLoggedIn;
+
+      // Visibility (PR-14): the model each tab currently shows, read passively
+      // from the picker label (no menu, no send) + the configured
+      // default/cheapest so cost choices are auditable.
+      for (const model of models) {
+        const page = pages[model];
+        const d = getProvider(model);
+        let current = null;
+        try {
+          current = page && d ? await readModelLabel(page, d) : null;
+        } catch {
+          current = null; // unreadable label is not a health failure
+        }
+        report.models[model] = {
+          current,
+          default: d?.models?.default ?? null,
+          cheapest: d?.models?.cheapest ?? null,
+        };
+      }
     }
   } catch (e) {
     report.chrome.error = e.message;
@@ -72,6 +94,12 @@ export function formatHealthReport(report) {
     text += `Login Status:\n`;
     for (const [model, status] of Object.entries(report.logins)) {
       text += `  ${model}: ${status.loggedIn ? 'OK' : 'FAIL'} ${status.reason}\n`;
+    }
+  }
+  if (report.models && Object.keys(report.models).length > 0) {
+    text += `\nCurrent model per tab (verified live · configured default/cheapest):\n`;
+    for (const [model, m] of Object.entries(report.models)) {
+      text += `  ${model}: ${m.current ?? 'unknown'} (default: ${m.default ?? '—'}, cheapest: ${m.cheapest ?? '—'})\n`;
     }
   }
   text += `\nRate limits (sends this session):\n`;

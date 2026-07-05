@@ -122,6 +122,13 @@ const TESTS = [
     requiresChrome: false
   },
   {
+    name: "Model Selection",
+    file: "unit/test-model-selection.js",
+    critical: false,
+    category: "unit",
+    requiresChrome: false
+  },
+  {
     name: "Research Queue",
     file: "unit/test-research-queue.js",
     critical: false,

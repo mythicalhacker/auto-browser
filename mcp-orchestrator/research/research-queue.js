@@ -67,11 +67,29 @@ export function routeProviders(geminiPriority) {
 }
 
 /**
+ * Per-task model map (PR-14): per-item `models` map overrides the batch-level
+ * `models` per provider; a per-item `model` STRING applies to every provider
+ * the task routes to. Returns a {provider: name} map or null (⇒ the runner
+ * uses the DR research profile / policy default). No validation here — the
+ * tool layer validates against known providers before submit.
+ */
+function resolveTaskModels(batchModels, item, providers) {
+  const out = {};
+  const pick = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  for (const p of providers) {
+    const chosen = pick(item.models?.[p]) ?? pick(item.model) ?? pick(batchModels?.[p]);
+    if (chosen) out[p] = chosen;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
  * Submit a batch of research prompts.
- * @param {Array<{prompt: string, project?: string, gemini_priority?: boolean}>} items
+ * @param {Array<{prompt: string, project?: string, gemini_priority?: boolean, model?: string, models?: object, model_policy?: string}>} items
+ * @param {{batch?: string, now?: number, models?: object, modelPolicy?: string}} opts batch-level model default
  * @returns {{batch: string, taskIds: string[]}}
  */
-export function submitBatch(items, { batch = null, now = Date.now() } = {}) {
+export function submitBatch(items, { batch = null, now = Date.now(), models = null, modelPolicy = null } = {}) {
   if (!Array.isArray(items) || items.length === 0) throw new Error('submitBatch: items must be a non-empty array');
   const q = load();
   const batchId = batch || `batch-${new Date(now).toISOString().slice(0, 10)}-${randomBytes(3).toString('hex')}`;
@@ -90,6 +108,9 @@ export function submitBatch(items, { batch = null, now = Date.now() } = {}) {
       project: item.project ?? null,
       geminiPriority: !!item.gemini_priority,
       providers,
+      // Explicit DR model per provider (else the runner's DR profile default).
+      models: resolveTaskModels(models, item, providers),
+      modelPolicy: item.model_policy ?? modelPolicy ?? null,
       timeoutMs: Number(item.timeout_ms) || null,
       createdAt: now,
       perProvider: Object.fromEntries(providers.map((p) => [p, {

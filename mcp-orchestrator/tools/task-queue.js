@@ -2,6 +2,7 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { validateModelsArg, validateModelPolicy } from '../models/resolve.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TASKS_DIR = path.join(__dirname, '..', 'state', 'tasks');
@@ -33,11 +34,16 @@ function saveTask(task) {
   writeFileSync(path.join(TASKS_DIR, `${task.id}.json`), JSON.stringify(task, null, 2));
 }
 
-function submitTask({ name, prompt, target, priority = 'normal', model, depends_on = [] }) {
+function submitTask({ name, prompt, target, priority = 'normal', model, models, model_policy, depends_on = [] }) {
   const id = `task_${++taskCounter}`;
   const task = {
     id, name: name || `Task ${taskCounter}`, prompt,
     target: target || model || 'auto',
+    // Explicit model selection (PR-14): resolved at dispatch time via
+    // per-provider `models` map → model_policy tier → configured default.
+    // Validated here so a bad policy/provider errors at submit, not at run.
+    models: validateModelsArg(models) ?? null,
+    modelPolicy: validateModelPolicy(model_policy),
     priority, depends_on,
     status: 'pending',
     created_at: new Date().toISOString(),
@@ -118,6 +124,8 @@ const TASK_TOOLS = [
     inputSchema: { type: 'object', properties: {
       name: { type: 'string' }, prompt: { type: 'string' },
       target: { type: 'string' }, priority: { type: 'string', enum: ['low','normal','high','critical'] },
+      models: { type: 'object', description: 'Explicit per-provider model, e.g. {"claude":"Haiku 4.5"}. A single-provider target uses only that provider; a consensus target uses all. Unavailable → model_unavailable warning + default.' },
+      model_policy: { type: 'string', enum: ['default','cheapest'], description: "Model tier when no explicit model is given: 'default' or 'cheapest'. The tab's last-used model is never inherited." },
       depends_on: { type: 'array', items: { type: 'string' } }
     }, required: ['prompt'] }
   },

@@ -10,7 +10,7 @@
 // blocked_login (needs the user). chatUrl is persisted from the first poll —
 // a paid run is never lost.
 import { writeFileSync, mkdirSync } from 'fs';
-import { getProvider } from '../models/registry.js';
+import { getProvider, modelConfigFor } from '../models/registry.js';
 import { getDriver } from '../models/drivers/index.js';
 import { findFirst, findAll } from '../utils/selectors.js';
 import { checkLogin } from '../utils/login-check.js';
@@ -36,6 +36,20 @@ export const DR_PREAMBLE = 'IMPORTANT: This runs unattended — do NOT ask any c
 
 function researchPrompt(task) {
   return `${DR_PREAMBLE}${task.prompt}`;
+}
+
+/**
+ * The model to select for a DR run (PR-14): the task's explicit per-provider
+ * model → the task's model_policy tier (cheapest/default) → the provider's DR
+ * research-profile model (the top-model default). Never inherits last-used.
+ */
+function resolveResearchModel(provider, task, profile) {
+  const explicit = task.models?.[provider];
+  if (explicit) return explicit;
+  const cfg = modelConfigFor(provider);
+  if (task.modelPolicy === 'cheapest') return cfg?.cheapest ?? profile.model;
+  if (task.modelPolicy === 'default') return cfg?.default ?? profile.model;
+  return profile.model; // DR profile default (a top model, e.g. Fable 5 / 3.1 Pro)
 }
 
 // Post-send watch window in which the runner clears a provider's
@@ -354,9 +368,13 @@ export async function runProviderTask(browserService, provider, task, { log = ()
 
   const d = getProvider(provider);
   const profile = d.research ?? {};
+  const resolvedModel = resolveResearchModel(provider, task, profile);
   const setup = await getDriver(provider).ensureChat(page, {
     project: task.project ?? undefined,
-    model: profile.model ?? undefined,
+    model: resolvedModel ?? undefined,
+    // An unavailable explicit/policy model falls back to the DR profile model
+    // (a real report on the wrong-but-capable model beats a failed run).
+    modelFallback: profile.model ?? d.models?.default ?? null,
     modes: profile.modes ?? {},
     research: true,
   });

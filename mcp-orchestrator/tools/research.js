@@ -9,6 +9,7 @@ import { synthesizeTask, finalPath } from '../research/synthesis.js';
 import { quotaSnapshot } from '../research/quota-ledger.js';
 import { acquireDrainLock, releaseDrainLock } from '../research/lockfile.js';
 import { providerNames } from '../models/registry.js';
+import { validateModelsArg, validateModelPolicy } from '../models/resolve.js';
 
 const ok = (text) => ({ content: [{ type: 'text', text }] });
 const err = (text) => ({ content: [{ type: 'text', text }], isError: true });
@@ -27,7 +28,18 @@ export async function handleResearchToolCall(name, args = {}, browserService = n
         return err('research_submit_batch: "items" must be a non-empty array of {prompt, project?, gemini_priority?}');
       }
       try {
-        const { batch, taskIds } = queue.submitBatch(items);
+        // Validate model args up front (batch-level + per item) so a bad
+        // policy/provider errors at submit, not mid-drain.
+        const models = validateModelsArg(args.models);
+        const modelPolicy = validateModelPolicy(args.model_policy);
+        for (const it of items) {
+          if (it.models) validateModelsArg(it.models);
+          if (it.model != null && (typeof it.model !== 'string' || !it.model.trim())) {
+            throw new Error("each item's 'model' must be a non-empty string");
+          }
+          if (it.model_policy != null) validateModelPolicy(it.model_policy);
+        }
+        const { batch, taskIds } = queue.submitBatch(items, { models, modelPolicy });
         const geminiPriority = items.filter((i) => i.gemini_priority).length;
         return ok(`Submitted batch ${batch}: ${taskIds.length} task(s), ${geminiPriority} gemini-priority.\n`
           + `Routing: gemini-priority → gemini+claude+chatgpt; others → claude+chatgpt.\n`
@@ -130,10 +142,15 @@ const RESEARCH_TOOLS = [
               project: { type: 'string', description: 'optional provider project/notebook to run inside' },
               gemini_priority: { type: 'boolean', description: 'also run on Gemini (top-5 priority set)' },
               timeout_ms: { type: 'integer', description: 'per-task DR wait ceiling override' },
+              model: { type: 'string', description: 'explicit DR model for ALL of this task\'s providers (overrides the batch default)' },
+              models: { type: 'object', description: 'explicit DR model per provider for this task, e.g. {"gemini":"3.1 Pro"} (overrides model + batch default)' },
+              model_policy: { type: 'string', enum: ['default', 'cheapest'], description: "this task's model tier when no explicit model is set" },
             },
             required: ['prompt'],
           },
         },
+        models: { type: 'object', description: 'batch-level default DR model per provider, e.g. {"chatgpt":"Pro Extended"}. Per-item model/models override it; otherwise the provider\'s DR research profile model is used.' },
+        model_policy: { type: 'string', enum: ['default', 'cheapest'], description: "batch-level model tier when neither an explicit model nor the DR profile applies" },
       },
       required: ['items'],
     },

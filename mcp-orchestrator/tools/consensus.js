@@ -5,6 +5,8 @@ import { ConsensusBarrier } from "../utils/barrier.js";
 import { findFirst, findAll } from "../utils/selectors.js";
 import { CONFIG, SELECTORS } from "../config.js";
 import { getProvider, providerNames } from "../models/registry.js";
+import { getDriver } from "../models/drivers/index.js";
+import { resolveModelName, parseModelSelection } from "../models/resolve.js";
 import { getHealthReport, formatHealthReport } from "../utils/health-check.js";
 import { compressForCrossPollination } from "../utils/context-compression.js";
 import { checkLogin } from "../utils/login-check.js";
@@ -382,6 +384,79 @@ export async function runConsensusRound(browserService, prompts, roundNum, opts 
   return roundData;
 }
 
+/**
+ * Resolve + SELECT an explicit model in every active tab BEFORE a run — the
+ * $400-lesson guard: a consensus/single round never inherits whatever model a
+ * tab last had. ensureChat opens a fresh, model-pinned chat per provider and
+ * sends nothing. Best-effort and NON-fatal: a selection miss is recorded and
+ * the run proceeds (the round send still lands in the fresh chat). Returns
+ * { provider: {requested, ok, verified, evidence, warning, fallbackTo} }.
+ */
+export async function selectModelsForRun(browserService, activeModels, { models = null, policy = null } = {}, { log = () => {} } = {}) {
+  const selection = {};
+  await Promise.all(activeModels.map(async (provider) => {
+    const requested = resolveModelName(provider, { explicit: models?.[provider] ?? null, policy });
+    if (!requested) { selection[provider] = { requested: null, ok: null, evidence: 'no model config for provider' }; return; }
+    const page = browserService.getPage(provider);
+    if (!page) { selection[provider] = { requested, ok: false, evidence: 'tab not found' }; return; }
+    const fallback = getProvider(provider)?.models?.default ?? null;
+    try {
+      const setup = await getDriver(provider).ensureChat(page, { model: requested, modelFallback: fallback });
+      const warn = setup.warnings.find((w) => w.code === 'model_unavailable');
+      const v = setup.verified.model;
+      selection[provider] = {
+        requested,
+        ok: v?.ok === true,
+        verified: v?.ok ? v.evidence : null,
+        evidence: v?.evidence ?? null,
+        warning: warn ? warn.detail : null,
+        fallbackTo: warn ? fallback : null,
+      };
+      if (warn) log(`[${provider}] model_unavailable — ${warn.detail}`);
+      else if (v?.ok) log(`[${provider}] model verified: ${v.evidence}`);
+      else log(`[${provider}] model selection unverified: ${v?.evidence ?? 'no evidence'}`);
+    } catch (e) {
+      selection[provider] = { requested, ok: false, evidence: `ensureChat threw: ${e.message}` };
+      log(`[${provider}] model selection error: ${e.message}`);
+    }
+  }));
+  return selection;
+}
+
+/** Per-provider message (send) count across a run: a model attempted in a
+ * round appears in that round's outputs OR errors. Surfaces per-run cost. */
+export function perProviderSends(rounds) {
+  const counts = {};
+  for (const r of rounds || []) {
+    for (const m of new Set([...Object.keys(r.outputs || {}), ...Object.keys(r.errors || {})])) {
+      counts[m] = (counts[m] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/** Human-readable model-selection + per-run message-count block (shared by
+ * status/results/single-round output). Empty string when nothing to show. */
+function formatModelReport(selection, rounds) {
+  let out = '';
+  if (selection && Object.keys(selection).length > 0) {
+    out += `\nModels (verified this run):\n`;
+    for (const [m, s] of Object.entries(selection)) {
+      const state = s.ok ? `verified: ${s.verified}`
+        : s.warning ? `model_unavailable → default (${s.warning})`
+        : s.ok === null ? (s.evidence || 'no model config')
+        : `unverified: ${s.evidence}`;
+      out += `  ${m}: ${s.requested ?? '(provider default)'} — ${state}\n`;
+    }
+  }
+  const sends = perProviderSends(rounds);
+  if (Object.keys(sends).length > 0) {
+    out += `\nMessages sent this run (per provider):\n`;
+    for (const [m, n] of Object.entries(sends)) out += `  ${m}: ${n}\n`;
+  }
+  return out;
+}
+
 // Per-peer embed budget for cross-pollination (matches context-compression's
 // default). Compression triggers only when combined peer text exceeds
 // peers × this budget.
@@ -518,13 +593,14 @@ export function checkConsensusReached(rounds) {
   return votes.length >= 2 && votes.every(v => v === "AGREE");
 }
 
-async function runFullConsensus(browserService, originalPrompt, maxRounds = 5, responseTimeoutMs = null) {
+async function runFullConsensus(browserService, originalPrompt, maxRounds = 5, responseTimeoutMs = null, modelOpts = {}) {
   consensusState = {
     active: true,
     originalPrompt,
     currentRound: 0,
     maxRounds,
     rounds: [],
+    models: null,
     finalConsensus: null,
     status: "running"
   };
@@ -541,6 +617,13 @@ async function runFullConsensus(browserService, originalPrompt, maxRounds = 5, r
     saveState();
     return consensusState;
   }
+
+  // Explicit model selection BEFORE any send — never inherit the tab's
+  // last-used model. Opens a fresh model-pinned chat per provider (no sends).
+  consensusState.status = "selecting_models";
+  saveState();
+  consensusState.models = await selectModelsForRun(browserService, initialModels, modelOpts);
+  saveState();
 
   // Round 1: Send original prompt
   consensusState.status = "round_1_sending";
@@ -597,6 +680,7 @@ function getStatusSummary() {
 
   let summary = `Status: ${consensusState.status}\n`;
   summary += `Rounds completed: ${consensusState.currentRound}/${consensusState.maxRounds}\n`;
+  summary += formatModelReport(consensusState.models, consensusState.rounds);
 
   if (consensusState.rounds.length > 0) {
     const lastRound = consensusState.rounds[consensusState.rounds.length - 1];
@@ -628,7 +712,9 @@ function getFullResults() {
   let result = `# Consensus Results\n\n`;
   result += `Original prompt: ${consensusState.originalPrompt?.substring(0, 100)}...\n`;
   result += `Status: ${consensusState.status}\n`;
-  result += `Total rounds: ${consensusState.currentRound}\n\n`;
+  result += `Total rounds: ${consensusState.currentRound}\n`;
+  result += formatModelReport(consensusState.models, consensusState.rounds);
+  result += `\n`;
 
   for (const round of consensusState.rounds) {
     result += `## Round ${round.round}\n`;
@@ -659,7 +745,9 @@ const CONSENSUS_TOOLS = [
       properties: {
         prompt: { type: "string", description: "The task/prompt to reach consensus on" },
         max_rounds: { type: "integer", default: 5, minimum: 2, maximum: 10, description: "Maximum iteration rounds (2-10)" },
-        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms for this run (deep-research prompts need far longer than chat). Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." }
+        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms for this run (deep-research prompts need far longer than chat). Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." },
+        model_policy: { type: "string", enum: ["default", "cheapest"], description: "Model tier when no explicit model is given: 'default' (configured provider default) or 'cheapest'. A model is ALWAYS selected explicitly — the tab's last-used model is never inherited." },
+        models: { type: "object", description: "Explicit per-provider model, e.g. {\"claude\":\"Haiku 4.5\",\"gemini\":\"3.1 Flash-Lite\"}. Overrides model_policy per provider; an unavailable name yields a model_unavailable warning and falls back to the configured default." }
       },
       required: ["prompt"]
     }
@@ -691,7 +779,9 @@ const CONSENSUS_TOOLS = [
       type: "object",
       properties: {
         prompt: { type: "string" },
-        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms. Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." }
+        response_timeout_ms: { type: "integer", minimum: 1000, maximum: 7200000, description: "Per-response wait ceiling in ms. Default: per-model config (TIMEOUT_RESPONSE_<MODEL>)." },
+        model_policy: { type: "string", enum: ["default", "cheapest"], description: "Model tier when no explicit model is given: 'default' or 'cheapest'. A model is always selected explicitly (never inherits last-used)." },
+        models: { type: "object", description: "Explicit per-provider model map; unavailable → model_unavailable warning + configured default." }
       },
       required: ["prompt"]
     }
@@ -746,6 +836,7 @@ export async function handleConsensusToolCall(name, args, browserService) {
         throw new Error("'max_rounds' must be an integer between 2 and 10");
       }
       const responseTimeoutMs = parseResponseTimeoutMs(args);
+      const modelOpts = parseModelSelection(args); // throws on bad model_policy/models
 
       // Single-flight: two concurrent runs would interleave sends into the
       // same tabs and fight over module-scoped state.
@@ -756,7 +847,7 @@ export async function handleConsensusToolCall(name, args, browserService) {
 
       // CRITICAL: fire-and-forget — do NOT await runFullConsensus.
       // .catch() uses module-scoped consensusState and saveState.
-      runFullConsensus(browserService, args.prompt, maxRounds, responseTimeoutMs)
+      runFullConsensus(browserService, args.prompt, maxRounds, responseTimeoutMs, modelOpts)
         .catch(e => {
           consensusState.status = `error: ${e.message}`;
           consensusState.active = false;
@@ -797,9 +888,15 @@ export async function handleConsensusToolCall(name, args, browserService) {
     case "send_single_round": {
       requirePrompt(args, "send_single_round");
       const responseTimeoutMs = parseResponseTimeoutMs(args);
+      const modelOpts = parseModelSelection(args); // throws on bad model_policy/models
       await browserService.connect();
+      // Explicit model selection before the round (never inherit last-used).
+      const activeModels = browserService.getActiveModels();
+      const selection = await selectModelsForRun(browserService, activeModels, modelOpts);
       const round = await runConsensusRound(browserService, args.prompt, 1, { responseTimeoutMs });
-      let result = `Round complete (${(round.duration/1000).toFixed(1)}s)\n\n`;
+      let result = `Round complete (${(round.duration/1000).toFixed(1)}s)\n`;
+      result += formatModelReport(selection, [round]);
+      result += `\n`;
       for (const [m, o] of Object.entries(round.outputs)) {
         result += `=== ${m.toUpperCase()} ===\n${o}\n\n`;
       }

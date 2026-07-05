@@ -330,8 +330,57 @@ function labelMatchesModel(labelText, modelName) {
     || model.endsWith(` ${label}`);
 }
 
-/** Select a model in the picker and verify the label afterwards. */
-export async function selectModel(page, d, modelName, result) {
+/**
+ * One model-selection attempt: open picker → click item by text → verify the
+ * label. Sets result.verified.model with a typed `code` on failure so the
+ * caller can distinguish the model_unavailable case (item absent from the
+ * picker) from a picker that never opened or a click that did not stick.
+ *   picker_not_found  — the picker control itself was not on the page
+ *   model_unavailable — the picker opened but has no such model (⇒ fallback)
+ *   unverified        — clicked, but the label never reflected the pick
+ */
+/**
+ * Click the model-picker item for `modelName` using the SAME boundary-anchored
+ * semantics as the post-click verify (labelMatchesModel) — NOT the unanchored
+ * substring match clickItemByText uses for menu labels. This closes a real
+ * hazard: a raw includes() would click 'Extra High' for a request of 'High',
+ * or 'Pro Standard' for 'Pro', then either mis-verify or leave the wrong
+ * (pricier) model live. Exact match wins; multiple anchored matches with no
+ * exact one are AMBIGUOUS and refused (the caller then falls back to the
+ * configured default rather than guess). Returns {ok, matched, seen, ambiguous}.
+ */
+async function clickModelItem(page, itemSelectors, modelName) {
+  const seen = [];
+  for (const sel of itemSelectors ?? []) {
+    let els;
+    try { els = await page.$$(sel); } catch { continue; }
+    if (els.length === 0) continue;
+    const cands = [];
+    for (const el of els) {
+      let text;
+      try { text = (await el.innerText()).trim(); } catch { continue; }
+      if (!text) continue;
+      seen.push(norm(text).slice(0, 60));
+      cands.push({ el, text });
+    }
+    const exact = cands.filter((c) => norm(c.text) === norm(modelName));
+    const anchored = cands.filter((c) => labelMatchesModel(c.text, modelName));
+    const pool = exact.length ? exact : anchored;
+    if (pool.length === 0) break; // structural selector matched; the name is genuinely absent
+    if (pool.length > 1) {
+      return { ok: false, matched: null, seen, ambiguous: pool.map((c) => norm(c.text).slice(0, 60)) };
+    }
+    try {
+      await pool[0].el.click({ force: true });
+      return { ok: true, matched: pool[0].text.slice(0, 80), seen };
+    } catch (e) {
+      return { ok: false, matched: `${pool[0].text.slice(0, 60)} (click failed: ${e.message})`, seen };
+    }
+  }
+  return { ok: false, matched: null, seen };
+}
+
+async function selectModelOnce(page, d, modelName, result) {
   const sel = d.selectors;
   const before = await firstText(page, sel.modelPickerLabel);
   if (before && labelMatchesModel(before.text, modelName)) {
@@ -342,16 +391,22 @@ export async function selectModel(page, d, modelName, result) {
 
   const opened = await clickFirst(page, sel.modelPicker);
   if (!record(result, 'open model picker', opened.ok, opened.selector ?? 'no picker selector matched')) {
-    result.verified.model = { ok: false, evidence: 'picker not found' };
+    result.verified.model = { ok: false, evidence: 'picker not found', code: 'picker_not_found' };
     return false;
   }
   await settle(page, MENU_SETTLE_MS);
 
-  const item = await clickItemByText(page, sel.modelPickerItem, modelName);
+  const item = await clickModelItem(page, sel.modelPickerItem, modelName);
   if (!item.ok) {
-    record(result, `pick model "${modelName}"`, false,
-      `not among: ${item.seen.slice(0, 10).join(' | ') || '(no items visible)'}`);
-    result.verified.model = { ok: false, evidence: item.seen.join(' | ').slice(0, 200) };
+    const why = item.ambiguous
+      ? `ambiguous — "${modelName}" matches ${item.ambiguous.join(' | ')}`
+      : `not among: ${item.seen.slice(0, 10).join(' | ') || '(no items visible)'}`;
+    record(result, `pick model "${modelName}"`, false, why);
+    // A menu that rendered items but has no unique match (absent OR ambiguous)
+    // is model_unavailable → fall back to the (unambiguous) default. Only a
+    // menu that never rendered items is a picker/UI problem, not a bad name.
+    const code = item.seen.length > 0 ? 'model_unavailable' : 'picker_not_found';
+    result.verified.model = { ok: false, evidence: why.slice(0, 200), code };
     await page.keyboard.press('Escape');
     return false;
   }
@@ -362,9 +417,80 @@ export async function selectModel(page, d, modelName, result) {
   const ok = !!after && labelMatchesModel(after.text, modelName);
   record(result, `verify model label shows "${modelName}"`, ok,
     after ? `"${norm(after.text).slice(0, 80)}"` : 'label unreadable');
-  result.verified.model = { ok, evidence: after ? norm(after.text).slice(0, 80) : null };
+  result.verified.model = ok
+    ? { ok: true, evidence: norm(after.text).slice(0, 80) }
+    : { ok: false, evidence: after ? norm(after.text).slice(0, 80) : null, code: 'unverified' };
   if (!ok) await page.keyboard.press('Escape');
   return ok;
+}
+
+/**
+ * Select a model, with a typed `model_unavailable` fallback that mirrors
+ * project_not_found: if the requested model is not offered by the picker AND a
+ * `fallback` (the configured default) is provided, push a model_unavailable
+ * warning and select the fallback instead — the result stays ok (never a hard
+ * failure, never a guess). Without a fallback, an unavailable/unverified model
+ * fails the result exactly as before.
+ */
+export async function selectModel(page, d, modelName, result, { fallback = null } = {}) {
+  const okBefore = result.ok;
+  if (await selectModelOnce(page, d, modelName, result)) return true;
+
+  const code = result.verified.model?.code;
+  if (code === 'model_unavailable' && fallback && norm(fallback) !== norm(modelName)) {
+    // The failed attempt's steps remain as evidence, but the miss itself must
+    // not fail the result — restore ok, warn, and select the default.
+    result.ok = okBefore;
+    const fell = await selectModelOnce(page, d, fallback, result);
+    // State the OUTCOME, not an unverified claim: the default may itself be
+    // absent from a drifted picker, in which case fell === false and the
+    // result already carries the (false) verified.model.
+    result.warnings.push({
+      code: 'model_unavailable',
+      detail: fell
+        ? `model "${modelName}" not offered in ${d.name}'s picker — fell back to default "${fallback}"`
+        : `model "${modelName}" not offered in ${d.name}'s picker, and default "${fallback}" is also unavailable`,
+    });
+    result.verified.model = { ...(result.verified.model || {}), requested: modelName, fallbackTo: fallback };
+    return fell;
+  }
+  return false;
+}
+
+/**
+ * Live calibration: open the model picker and read every offered label (the
+ * picker is the source of truth for what's actually selectable). Returns the
+ * de-duplicated list; the caller diffs it against the configured choices via
+ * registry.modelDriftReport. Sends nothing.
+ */
+export async function calibrateModels(page, d) {
+  const sel = d.selectors;
+  const opened = await clickFirst(page, sel.modelPicker);
+  if (!opened.ok) return { ok: false, choices: [], evidence: 'model picker did not open' };
+  await settle(page, MENU_SETTLE_MS);
+  const raw = [];
+  for (const s of sel.modelPickerItem ?? []) {
+    let els;
+    try { els = await page.$$(s); } catch { continue; }
+    for (const el of els) {
+      try {
+        const t = String(await el.innerText()).replace(/\s+/g, ' ').trim();
+        if (t) raw.push(t);
+      } catch { /* detached — skip */ }
+    }
+    if (els.length > 0) break; // the structural selector matched
+  }
+  await page.keyboard.press('Escape');
+  const seen = new Set();
+  const choices = raw.filter((c) => { const k = c.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  return { ok: choices.length > 0, choices, evidence: choices.join(' | ').slice(0, 400) };
+}
+
+/** Current model per the picker label (whitespace-normalized, case kept), or
+ * null. A cheap read (no menu, no send) for health_check visibility. */
+export async function readModelLabel(page, d) {
+  const t = await firstText(page, d.selectors.modelPickerLabel ?? []);
+  return t ? String(t.text).replace(/\s+/g, ' ').trim() : null;
 }
 
 /** Enable a named mode toggle (from registry modeToggles) and verify. */
@@ -521,9 +647,11 @@ export function createDriver(providerName, quirks = {}) {
         await openFreshChat(page, d, result, wantResearch);
       }
 
-      // 2. Model selection (verified via the picker label).
+      // 2. Model selection (verified via the picker label). opts.modelFallback
+      // (the configured default) turns an unavailable requested model into a
+      // typed model_unavailable warning + default, never a hard failure.
       if (opts.model) {
-        await (quirks.selectModel ?? selectModel)(page, d, opts.model, result);
+        await (quirks.selectModel ?? selectModel)(page, d, opts.model, result, { fallback: opts.modelFallback ?? null });
       }
 
       // 3. Mode toggles (extended thinking etc.). Values may carry a level

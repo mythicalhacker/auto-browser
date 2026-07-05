@@ -81,7 +81,17 @@ const DEFAULTS = {
     capabilities: {
       deepResearch: true,
       projects: true,
-      modelChoices: ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5'],
+    },
+    // Model-selection config (PR-14). `choices` is the SEED list of picker
+    // labels — it is re-discovered live by the calibration step (the picker is
+    // the source of truth; lineups change), and `default`/`cheapest` are
+    // validated to be members. Never inherit last-used: every product send
+    // resolves an explicit model (per-call → per-task → this default). Cost
+    // control: `cheapest` (also the e2e testModel unless a gate overrides).
+    models: {
+      choices: ['Fable 5', 'Opus 4.8', 'Sonnet 5', 'Haiku 4.5'],
+      default: 'Sonnet 5',
+      cheapest: 'Haiku 4.5',
     },
     // Default ensureChat profile for deep-research runs (user preference:
     // top models with thinking; claude thinking is built in, effort=max).
@@ -162,10 +172,16 @@ const DEFAULTS = {
     capabilities: {
       deepResearch: true,
       projects: true,
-      modelChoices: ['Instant', 'Medium', 'High', 'Extra High', 'Pro Standard', 'Pro Extended', 'GPT-5.5', 'GPT-5.4', 'GPT-5.3', 'o3'],
       // Thinking-mode workaround: response DOM empties after streaming; a
       // reload forces React to re-render from server state.
       reloadOnEmptyOutput: true,
+    },
+    // Seed choices (calibration re-discovers live). The picker mixes
+    // intelligence tiers and Pro variants; 'Instant' is the cheapest tier.
+    models: {
+      choices: ['Instant', 'Medium', 'High', 'Extra High', 'Pro Standard', 'Pro Extended', 'GPT-5.5', 'GPT-5.4', 'GPT-5.3', 'o3'],
+      default: 'Medium',
+      cheapest: 'Instant',
     },
     research: { model: 'Pro Extended', modes: {} },
     // DR pre-generation gate (live-discovered 2026-07-04): ChatGPT may pose a
@@ -249,7 +265,11 @@ const DEFAULTS = {
     capabilities: {
       deepResearch: true,
       projects: true, // notebooks
-      modelChoices: ['3.1 Flash-Lite', '3.5 Flash', '3.1 Pro'],
+    },
+    models: {
+      choices: ['3.1 Flash-Lite', '3.5 Flash', '3.1 Pro'],
+      default: '3.5 Flash',
+      cheapest: '3.1 Flash-Lite',
     },
     research: { model: '3.1 Pro', modes: { extendedThinking: true } },
     // DR pre-generation gate (live-discovered 2026-07-04): Gemini Deep
@@ -284,6 +304,10 @@ const DEFAULTS = {
 const isStringArray = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string');
 const isHttpUrl = (v) => typeof v === 'string' && /^https?:\/\//.test(v);
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// Whitespace-normalized lowercase — model picker labels render with embedded
+// newlines ('Pro\nExtended'), so a name must be compared the way the driver's
+// clickItemByText/labelMatchesModel compare it.
+const normName = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 // Provider keys feed TIMEOUT_RESPONSE_<KEY.toUpperCase()> env names and the
 // '=== KEY ===' consensus section headers: lowercase alphanumeric only, so
@@ -384,7 +408,25 @@ function validateProvider(name, d, problems) {
       for (const key of ['deepResearch', 'projects', 'reloadOnEmptyOutput']) {
         if (cap[key] !== undefined && typeof cap[key] !== 'boolean') p(`"capabilities.${key}" must be a boolean`);
       }
-      if (cap.modelChoices !== undefined && !isStringArray(cap.modelChoices)) p('"capabilities.modelChoices" must be an array of strings');
+    }
+  }
+  // Model-selection config (PR-14): choices seed the picker snapshot;
+  // default/cheapest (and optional testModel) MUST be members so a resolution
+  // can never point at a model the picker will never offer.
+  if (d.models !== undefined) {
+    if (!isPlainObject(d.models)) p('"models" must be an object');
+    else {
+      const M = d.models;
+      const inChoices = (name) => isStringArray(M.choices) && M.choices.some((c) => normName(c) === normName(name));
+      if (!isStringArray(M.choices) || M.choices.length === 0) p('"models.choices" must be a non-empty array of strings');
+      for (const key of ['default', 'cheapest']) {
+        if (typeof M[key] !== 'string' || !M[key]) p(`"models.${key}" must be a non-empty string`);
+        else if (!inChoices(M[key])) p(`"models.${key}" (${JSON.stringify(M[key])}) must be one of models.choices`);
+      }
+      if (M.testModel !== undefined) {
+        if (typeof M.testModel !== 'string' || !M.testModel) p('"models.testModel" must be a non-empty string');
+        else if (!inChoices(M.testModel)) p(`"models.testModel" (${JSON.stringify(M.testModel)}) must be one of models.choices`);
+      }
     }
   }
   if (d.timeouts !== undefined) {
@@ -597,6 +639,42 @@ export function sendLimitsView() {
 /** Login-page URL fragments for a provider (lowercase match expected). */
 export function loginUrlPatternsFor(name) {
   return registry[name]?.loginUrlPatterns ?? COMMON_LOGIN_URL_PATTERNS;
+}
+
+/** Model-selection config {choices, default, cheapest, testModel?} or null. */
+export function modelConfigFor(name) {
+  return registry[name]?.models ?? null;
+}
+
+/** The model e2e gates pin (cheapest unless a descriptor overrides testModel). */
+export function testModelFor(name) {
+  const m = registry[name]?.models;
+  return m ? (m.testModel ?? m.cheapest) : null;
+}
+
+/**
+ * Compare a LIVE picker snapshot against the configured choices. Model
+ * lineups drift; the picker is the source of truth. Returns what changed plus
+ * whether the resolvable names (default/cheapest) are actually offered — a
+ * false there means selection would fall back or fail and MUST be surfaced.
+ */
+export function modelDriftReport(name, liveChoices) {
+  const cfg = registry[name]?.models;
+  if (!cfg) return null;
+  const live = Array.isArray(liveChoices) ? liveChoices : [];
+  const liveNorm = live.map(normName);
+  const cfgNorm = cfg.choices.map(normName);
+  return {
+    provider: name,
+    configured: cfg.choices,
+    live,
+    missing: cfg.choices.filter((c) => !liveNorm.includes(normName(c))), // configured but not offered live
+    added: live.filter((c) => !cfgNorm.includes(normName(c))),           // offered live but not configured
+    cheapestPresent: liveNorm.includes(normName(cfg.cheapest)),
+    defaultPresent: liveNorm.includes(normName(cfg.default)),
+    drifted: cfg.choices.length !== live.length
+      || cfg.choices.some((c, i) => normName(c) !== normName(live[i])),
+  };
 }
 
 /**
