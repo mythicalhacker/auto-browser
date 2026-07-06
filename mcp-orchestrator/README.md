@@ -1,6 +1,8 @@
 # MCP Orchestrator
 
-Multi-model consensus orchestration for Claude, ChatGPT, and Gemini.
+Multi-model consensus and deep-research orchestration for Claude, ChatGPT, and Gemini.
+
+> **Scope, risk & platform.** This automates provider web UIs (claude.ai, chatgpt.com, gemini.google.com) — it is **not affiliated with Anthropic, OpenAI, or Google**, and their terms of service may restrict automation. Use your own personal, paid accounts, **at your own risk**; deep research spends real quota and money. **macOS is live-proven end to end; Windows/Linux Chrome paths are configured but untested.** Full disclaimer in the [top-level README](../README.md#terms-of-service--risk-disclaimer). Bugs → issue [templates](../.github/ISSUE_TEMPLATE/); security → [SECURITY.md](../SECURITY.md) — never paste profile paths, cookies, or session data into a public issue.
 
 ## Setup
 
@@ -197,9 +199,9 @@ research_export({ task_id: "<id>" })        # returns the final report
 
 or headless for the whole batch: `node scripts/run-queue.js --synthesize --batch=<id>` (skips tasks that already have a `FINAL.md` unless `--force`).
 
-**Wall-time honesty.** A real batch is long even when everything works. ~32 tasks × 2 providers × 15–45 min each, serial per provider, is **multiple days of runtime** — plus Gemini's ~5 deep-research/day trickle for the priority set, and provider limits that can appear on Claude/ChatGPT too. The persisted queue + cooldown auto-resume + headless runner exist precisely so this needs no babysitting — but the Mac must stay awake (`caffeinate`) and the sites logged in. Watch the daily Gemini budget with `quota_status`.
+**Wall-time honesty.** A real batch is long even when everything works. Each deep-research run takes minutes to tens of minutes, and the runner goes serial per provider — so ~32 tasks across two providers is **many hours of runtime**, and once you factor Gemini's ~5-per-day cap for the priority set and the daily limits that can surface on Claude/ChatGPT too, it realistically spreads across more than one day. The persisted queue + cooldown auto-resume + headless runner exist precisely so this needs no babysitting — but the Mac must stay awake (`caffeinate`) and the sites logged in. Watch the daily Gemini budget with `quota_status`.
 
-**Known limitation (deep-research pre-generation gates).** As of July 2026, Claude and ChatGPT deep research each open with a UI step *before* generating — Claude shows a "which connectors to enable" modal after send; ChatGPT may pose a scoping question. The runner already prefixes each prompt with a "don't ask clarifying questions, produce the full report now" directive, but a *modal* can't be dismissed by prompt text — clicking through these gates needs a provider-specific driver step (live-discovered selector + a post-send `ensureChat` action). Until that lands, unattended deep-research runs can stall at this gate and time out (the run is marked `failed` with its chat URL preserved, never a fabricated report, never a double-spend). The consensus/synthesis paths are unaffected. Track this before running the full 37-prompt batch.
+**Deep-research pre-generation gates (handled).** Each provider's deep research opens with a UI step *before* it generates — Claude a "which connectors to enable" modal after send, ChatGPT a scoping/clarifying question, Gemini a research-plan confirmation. Two mechanisms clear them: every deep-research prompt is prefixed with a "don't ask clarifying questions, produce the full report now" directive, and the runner clears the gate directly using live-discovered selectors in the registry (`generationGates`) — clicking a modal / plan-confirmation control, or auto-replying **once** to a clarifying question (never to a report). All three providers were verified generating *and* fully harvesting their reports live during development on the tested accounts. Because these selectors track provider UI, a UI change can break a gate until the registry is updated (`~/.auto-browser/registry.json` override, no code change needed); when a run cannot complete it is marked `failed` with its chat URL preserved — never a fabricated report, never a double-spend. The consensus/synthesis paths are unaffected.
 
 ---
 
@@ -215,7 +217,7 @@ or headless for the whole batch: `node scripts/run-queue.js --synthesize --batch
 - Run `connect_browser` to see connection status
 
 **Selectors not working**
-- Sites update their UI often; selectors are defined in `config.js`
+- Sites update their UI often. Every provider selector lives in `models/registry.js`; override any of them per key via `~/.auto-browser/registry.json` (deep-merged, no code change needed). `config.js` exposes them as read-only views.
 - Run `node tests/integration/test-selectors.js` (needs the debug Chrome running) to check them
 
 ---
