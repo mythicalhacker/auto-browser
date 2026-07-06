@@ -54,9 +54,9 @@ Node.js ≥ 20. macOS is the live-proven platform (see **Platform status** below
 
 ## Performance
 
-Sends go out to all three providers **in parallel** (`Promise.all`) via a single Chrome DevTools `insertText` event — no per-keystroke typing and no OS clipboard, with pre-captured message counts and verified streaming indicators. A round's wall-clock is bound by the *slowest model's response*, not by send overhead or the orchestrator.
+Sends go out to all three providers **in parallel** (`Promise.all`) via a single Chrome DevTools `insertText` event — no per-keystroke typing and no OS clipboard, with pre-captured message counts and verified streaming indicators. A round's wall-clock is dominated by the *slowest model's response*, not by send overhead or the orchestrator.
 
-Observed response latencies on the tested personal accounts (ordinary sends, not deep research): Claude ≈ 8–13 s, Gemini ≈ 9–20 s, ChatGPT ≈ 44–120 s+ with extended thinking. Deep-research runs legitimately take minutes to tens of minutes each. When peer responses are large, they are compressed (~6× observed) before being cross-pollinated into the next round.
+Response latencies observed during development on the tested personal accounts (ordinary sends, not deep research; not benchmarks, and they vary with network and provider load): Claude ≈ 8–13 s, Gemini ≈ 9–20 s, ChatGPT ≈ 44–120 s+ with extended thinking. Deep-research runs legitimately take minutes to tens of minutes each. When peer responses are large, they are compressed (~6× observed) before being cross-pollinated into the next round.
 
 ## Monitoring
 
@@ -73,6 +73,13 @@ This project **automates provider web UIs**. It is **not affiliated with, endors
 ## Platform status
 
 **macOS is live-proven end to end.** Windows and Linux Chrome paths are configured but currently untested since the project's migration to macOS — expect to adjust the Chrome binary path (`CHROME_PATH`) and debug them before relying on them there.
+
+## Known limitations
+
+- **Provider UI drift.** These are live web UIs; a provider redesign can break a selector or a flow until the registry is updated — override any selector per key via `~/.auto-browser/registry.json` (no code change needed).
+- **Synthesis needs quorum.** Cross-model synthesis quality depends on at least two providers returning usable reports for a task.
+- **Advisory stats.** The rate-limiter and latency stats are advisory and assume a single machine and profile — they are not a hard control.
+- **Peer outputs are not yet injection-fenced.** In consensus rounds each model sees the others' responses; prompt-injection fencing of that content is on the roadmap, not yet implemented (see [SECURITY.md](SECURITY.md)).
 
 ## Support
 
