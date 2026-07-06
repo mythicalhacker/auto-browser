@@ -15,11 +15,12 @@
 // Reuses the running debug Chrome; never logs in. Read-only except the
 // recovered artifacts it writes and the triage task it flips to complete.
 //
-// Usage:
-//   DR_GATE_WATCH_MS=4000 DR_GATE_POLL_MS=1000 \
-//     node scripts/e2e/dr-harvest-recover.mjs \
-//       [--task=task-22d49cb8] [--urls=<c1>,<c2>,...] [--out=<dir>]
-import { mkdirSync, writeFileSync } from 'fs';
+// Usage (supply your own targets — no real conversation URLs are baked in):
+//   node scripts/e2e/dr-harvest-recover.mjs \
+//     [--task=<queue-task-id>] \
+//     [--urls=<c1>,<c2>,...] [--urls-file=<path>] [--out=<dir>]
+//   or via env: DR_RECOVER_TASK / DR_RECOVER_URLS / DR_RECOVER_URLS_FILE.
+import { mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { browserService } from '../../services/browser-service.js';
 import { resumeProviderTask } from '../../research/runner.js';
@@ -32,16 +33,29 @@ import { RESEARCH_HOME } from '../../research/research-queue.js';
 const args = process.argv.slice(2);
 const flag = (n, d) => { const a = args.find((x) => x.startsWith(`--${n}=`)); return a ? a.split('=').slice(1).join('=') : d; };
 
-const TRIAGE_TASK = flag('task', 'task-22d49cb8');
-// Prior "failed" ChatGPT DR chats whose paid reports were discarded by the old
-// harvester (preserved across queue.json + e2e .state). The triage URL is
-// recovered via the product resume path above; these three are the sweep.
-const DEFAULT_URLS = [
-  'https://chatgpt.com/c/6a495a6c-046c-83ea-9982-27db93960226',
-  'https://chatgpt.com/c/6a493062-4cac-83ea-95d0-84aa15c6a2df',
-  'https://chatgpt.com/c/6a493cc1-9850-83ea-b92d-252807a6de9b',
-];
-const SWEEP_URLS = (flag('urls') ? flag('urls').split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_URLS);
+// Triage task recovered via the product resume path (step 1). This is a local
+// queue id, not a conversation URL — supply your own via --task or DR_RECOVER_TASK.
+// Empty ⇒ the product-resume step is skipped and only the sweep runs.
+const TRIAGE_TASK = flag('task', process.env.DR_RECOVER_TASK || '');
+
+// Prior "failed" ChatGPT DR chats whose paid reports the old harvester discarded,
+// re-harvested in the sweep (step 2). Real conversation URLs are PRIVATE — they are
+// NEVER hardcoded in this tracked file. Provide your own, in priority order:
+//   --urls=<c1>,<c2>,...            (comma-separated) | DR_RECOVER_URLS env
+//   --urls-file=<path>              (one URL per line; blank + #comment lines ignored)
+//                                   | DR_RECOVER_URLS_FILE env
+//   default fixtures file (untracked): $RESEARCH_HOME/e2e-fixtures/dr-recover-urls.txt
+// With none provided the sweep is skipped and only the product-resume step runs.
+function loadSweepUrls() {
+  const inline = flag('urls', process.env.DR_RECOVER_URLS || '');
+  if (inline) return inline.split(',').map((s) => s.trim()).filter(Boolean);
+  const file = flag('urls-file', process.env.DR_RECOVER_URLS_FILE
+    || join(RESEARCH_HOME, 'e2e-fixtures', 'dr-recover-urls.txt'));
+  try {
+    return readFileSync(file, 'utf8').split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
+  } catch { return []; }
+}
+const SWEEP_URLS = loadSweepUrls();
 const OUT = flag('out', join(RESEARCH_HOME, 'recovered'));
 
 // Mirror the runner's DR_MIN_REPORT_CHARS (intentionally module-private there).
