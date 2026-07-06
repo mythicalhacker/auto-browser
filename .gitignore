@@ -1,9 +1,23 @@
+# OS / editor cruft
 .DS_Store
-node_modules/
 .idea/
-.claude/
+.vscode/
 nul
+
+# Node
+node_modules/
+
+# Python (legacy experiment tooling)
+__pycache__/
+*.pyc
+
+# Local agent settings
+.claude/
 
 # Chrome debug profile — contains Login Data, History, cookies. NEVER commit.
 .chrome-debug/
 chrome-debug-profile/
+
+# Internal / local-only — dev scaffolding and audit trail (never ship)
+dev-notes/
+RUN_REPORT.md

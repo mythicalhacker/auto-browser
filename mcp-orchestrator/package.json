@@ -1,7 +1,8 @@
 {
   "name": "mcp-orchestrator",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "MCP server for multi-model prompt orchestration",
+  "license": "MIT",
   "main": "server.js",
   "type": "module",
   "bin": {
