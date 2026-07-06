@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an enhancement or a new capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Please keep session data out of public issues — no cookies,
+        tokens, profile paths, or real conversation URLs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and where does Auto_Browser fall short today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like it to do? If it involves a new provider, note that providers are added as registry descriptors.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Consensus / verdict protocol
+        - Deep-research pipeline
+        - Browser automation tools
+        - Provider registry / selectors
+        - Model selection
+        - Tooling / stats / observability
+        - Other
+    validations:
+      required: true

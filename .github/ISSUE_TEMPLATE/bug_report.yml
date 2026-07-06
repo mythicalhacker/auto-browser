@@ -1,0 +1,104 @@
+name: Bug report
+description: Report a problem with Auto_Browser
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Before you post, a safety note:**
+
+        🔒 **Never paste session or profile data into this public issue** — no cookies,
+        tokens, `Authorization` headers, Chrome profile paths/contents
+        (`~/.auto-browser/chrome-profile/…`), or real conversation URLs
+        (`claude.ai/chat/…`, `chatgpt.com/c/…`, `gemini.google.com/app/…`).
+        Redact logs before pasting. Anything security-sensitive should go through
+        [SECURITY.md](../blob/main/SECURITY.md) instead, not a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Auto_Browser version (from `mcp-orchestrator/package.json`) or commit SHA.
+      placeholder: "3.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Note that only macOS is live-proven; Windows/Linux are configured but untested.
+      options:
+        - macOS
+        - Linux (untested platform)
+        - Windows (untested platform)
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: "v20.x / v22.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider(s) involved
+      description: Which model site(s) the bug touches — helps localize selector / UI drift.
+      multiple: true
+      options:
+        - Claude (claude.ai)
+        - ChatGPT (chatgpt.com)
+        - Gemini (gemini.google.com)
+        - Not provider-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Does this look like provider UI / selector drift?
+      description: e.g. a flow that used to work now can't find a button/field after a site update. Selectors live in `models/registry.js` and can be overridden via `~/.auto-browser/registry.json`.
+      options:
+        - "No / not sure"
+        - "Yes — a selector or UI step stopped matching"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe? Include the tool you called and the error/outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. connect_browser
+        2. start_consensus({ prompt: "…" })
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (redacted)
+      description: Paste any relevant console output — with all session data removed.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have removed all cookies, tokens, profile paths, and real conversation URLs from this report.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md, privately).
+          required: true
